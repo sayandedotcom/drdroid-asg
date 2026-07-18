@@ -1,65 +1,111 @@
-import Image from "next/image";
+import SignInButton from "./sign-in-button";
 
-export default function Home() {
+const STEPS = [
+  {
+    n: "01",
+    title: "Sign in with GitHub",
+    body: "No password, no signup form. One click and you have an account.",
+  },
+  {
+    n: "02",
+    title: "Unlock with a coupon or $5",
+    body: "Enter a coupon code, or pay by card. Either way you get 5 research credits.",
+  },
+  {
+    n: "03",
+    title: "Add your own model key",
+    body: "Paste an API key from Anthropic, OpenAI, or Moonshot. Your key, your billing, encrypted at rest.",
+  },
+  {
+    n: "04",
+    title: "Ask a real question",
+    body: "The agent searches, reads, reasons, searches again — and can hand you a PDF report at the end.",
+  },
+];
+
+export default function Landing() {
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
+    <main className="relative min-h-screen overflow-hidden">
+      <div
+        aria-hidden
+        className="pointer-events-none absolute -top-40 left-1/2 h-[36rem] w-[64rem] -translate-x-1/2 rounded-full opacity-[0.16] blur-[120px]"
+        style={{ background: "radial-gradient(closest-side, #e2833c, transparent)" }}
+      />
+
+      <div className="relative mx-auto flex max-w-5xl flex-col px-6 py-10 sm:py-16">
+        <header className="flex items-center justify-between">
+          <div className="flex items-baseline gap-2">
+            <span className="font-[family-name:var(--font-display)] text-xl tracking-tight">
+              MicroManus
+            </span>
+            <span className="hidden text-xs text-ink-500 sm:inline">deep research agent</span>
+          </div>
+        </header>
+
+        <section className="mt-20 max-w-3xl sm:mt-28">
+          <p className="mb-5 inline-flex items-center gap-2 rounded-full border border-ink-700 bg-ink-900/60 px-3 py-1 text-xs text-ink-400">
+            <span className="h-1.5 w-1.5 rounded-full bg-ember-500" />
+            Bring your own model key
           </p>
-        </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
-        </div>
-      </main>
-    </div>
+
+          <h1 className="font-[family-name:var(--font-display)] text-4xl leading-[1.12] tracking-tight sm:text-6xl">
+            Ask a hard question.
+            <br />
+            <span className="text-ember-400">Get a researched answer.</span>
+          </h1>
+
+          <p className="mt-6 max-w-xl text-base leading-relaxed text-ink-400 sm:text-lg">
+            MicroManus searches the live web, reads what it finds, reconsiders, and searches
+            again — as many times as the question needs. When you want something you can hand to
+            someone else, it writes a formatted PDF report.
+          </p>
+
+          <div className="mt-9 flex flex-col items-start gap-4 sm:flex-row sm:items-center">
+            <SignInButton />
+            <span className="text-xs text-ink-500">5 credits to start · coupon or $5</span>
+          </div>
+        </section>
+
+        <section className="mt-24 grid gap-x-10 gap-y-8 border-t border-ink-800 pt-12 sm:mt-32 sm:grid-cols-2">
+          {STEPS.map((s) => (
+            <div key={s.n} className="flex gap-4">
+              <span className="pt-1 font-[family-name:var(--font-mono)] text-xs text-ember-600">
+                {s.n}
+              </span>
+              <div>
+                <h3 className="text-sm font-medium text-ink-100">{s.title}</h3>
+                <p className="mt-1.5 text-sm leading-relaxed text-ink-500">{s.body}</p>
+              </div>
+            </div>
+          ))}
+        </section>
+
+        <section className="mt-20 rounded-xl border border-ink-800 bg-ink-900/40 p-6 sm:p-8">
+          <h2 className="font-[family-name:var(--font-display)] text-lg">
+            Every run is costed, down to the token
+          </h2>
+          <p className="mt-2 max-w-2xl text-sm leading-relaxed text-ink-500">
+            The agent loop makes several model calls per question. MicroManus records each one and
+            breaks the spend down by input, output, and cached tokens — priced at the real rates for
+            the model you picked. The Usage page shows it per chat and in total.
+          </p>
+          <div className="mt-6 flex flex-wrap gap-2">
+            {["Claude Opus 4.8", "Claude Sonnet 5", "GPT-5", "GPT-4.1", "Kimi K2"].map((m) => (
+              <span
+                key={m}
+                className="rounded-md border border-ink-700 bg-ink-850 px-2.5 py-1 font-[family-name:var(--font-mono)] text-xs text-ink-400"
+              >
+                {m}
+              </span>
+            ))}
+            <span className="rounded-md px-2.5 py-1 text-xs text-ink-600">+ 3 more</span>
+          </div>
+        </section>
+
+        <footer className="mt-20 border-t border-ink-800 pt-6 pb-4 text-xs text-ink-600">
+          Your API key is encrypted before storage and only ever used to serve your own requests.
+        </footer>
+      </div>
+    </main>
   );
 }
