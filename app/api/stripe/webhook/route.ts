@@ -33,12 +33,19 @@ export async function POST(req: Request) {
     if (userId && session.payment_status === "paid") {
       // Keyed on the session id, so the confirm-on-return path and this
       // webhook can both fire without granting twice.
-      await supabaseAdmin().rpc("grant_credits", {
+      const { error } = await supabaseAdmin().rpc("grant_credits", {
         p_user: userId,
         p_amount: 5,
         p_method: "stripe",
         p_event_id: `stripe:${session.id}`,
       });
+
+      // Answering 200 here would retire the event; a non-2xx makes Stripe retry
+      // with backoff, which is what a paid-but-not-credited user needs.
+      if (error) {
+        console.error("stripe webhook grant failed", { user: userId, session: session.id, error });
+        return NextResponse.json({ error: "Could not grant credits." }, { status: 500 });
+      }
     }
   }
 

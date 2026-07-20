@@ -47,7 +47,15 @@ export async function POST(req: Request) {
     p_event_id: `stripe:${session.id}`,
   });
 
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+  // The payment succeeded, so a failed grant is the worst case here: never
+  // report success the user's balance doesn't reflect.
+  if (error || typeof credits !== "number" || credits < 1) {
+    console.error("stripe grant failed", { user: user.id, session: session.id, error, credits });
+    return NextResponse.json(
+      { error: "Your payment went through but credits could not be added. Contact support." },
+      { status: 500 }
+    );
+  }
 
   return NextResponse.json({ ok: true, credits });
 }

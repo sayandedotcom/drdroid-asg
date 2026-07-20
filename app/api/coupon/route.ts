@@ -40,7 +40,15 @@ export async function POST(req: Request) {
     p_event_id: `coupon:${user.id}`,
   });
 
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+  // A grant that didn't land must not report success — the paywall would say
+  // "5 credits added" and then redirect straight back to itself.
+  if (error || typeof credits !== "number" || credits < 1) {
+    console.error("coupon grant failed", { user: user.id, error, credits });
+    return NextResponse.json(
+      { error: "Could not add credits to your account. Please try again." },
+      { status: 500 }
+    );
+  }
 
   return NextResponse.json({ ok: true, credits });
 }
