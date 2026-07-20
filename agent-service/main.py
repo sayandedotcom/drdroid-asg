@@ -98,19 +98,29 @@ async def health() -> dict[str, Any]:
 
 async def _run_episode(req: RunRequest, ctx: RunContext, queue: asyncio.Queue) -> None:
     """Drives the graph and pushes terminal events onto the queue."""
+    usage_writes: list[asyncio.Task] = []
     try:
         search = build_search_tool(ctx, getattr(app.state, "mcp_search", None))
         report = build_report_tool(ctx, db.upload_report, db.save_artifact)
 
         def on_usage(input_tokens: int, output_tokens: int, cached: int) -> None:
-            db.record_usage(
-                chat_id=req.chat_id,
-                user_id=req.user_id,
-                model=req.model,
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
-                cached_tokens=cached,
-                cost_usd=cost_of(req.model, input_tokens, output_tokens, cached),
+            # record_usage is a blocking HTTP POST and this fires once per model
+            # call, including mid-stream. Running it inline would stall the event
+            # loop and stutter the deltas, so hand it to a thread; the tasks are
+            # awaited below so no row is lost if the episode finishes first.
+            usage_writes.append(
+                asyncio.create_task(
+                    asyncio.to_thread(
+                        db.record_usage,
+                        chat_id=req.chat_id,
+                        user_id=req.user_id,
+                        model=req.model,
+                        input_tokens=input_tokens,
+                        output_tokens=output_tokens,
+                        cached_tokens=cached,
+                        cost_usd=cost_of(req.model, input_tokens, output_tokens, cached),
+                    )
+                )
             )
 
         graph = build_graph(
@@ -140,6 +150,11 @@ async def _run_episode(req: RunRequest, ctx: RunContext, queue: asyncio.Queue) -
             content=text,
             steps=ctx.steps,
         )
+        # Settle the usage rows before `done`, since the client refreshes off
+        # that event and would otherwise race the cost page.
+        if usage_writes:
+            await asyncio.gather(*usage_writes, return_exceptions=True)
+
         done: dict[str, Any] = {"t": "done"}
         if req.credits_remaining is not None:
             done["credits"] = req.credits_remaining
@@ -159,6 +174,10 @@ async def _run_episode(req: RunRequest, ctx: RunContext, queue: asyncio.Queue) -
             event["credits"] = credits
         await queue.put(event)
     finally:
+        # Calls that completed before a failure are still billable, so let their
+        # writes finish rather than dropping them with the task.
+        if usage_writes:
+            await asyncio.gather(*usage_writes, return_exceptions=True)
         await queue.put(DONE)
 
 

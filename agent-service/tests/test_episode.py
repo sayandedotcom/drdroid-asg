@@ -552,3 +552,39 @@ async def test_done_event_carries_remaining_credits(recorded, fake_rest_search, 
     await task
 
     assert next(e for e in events if e["t"] == "done")["credits"] == 3
+
+
+async def test_usage_rows_are_written_before_the_done_event(recorded, monkeypatch):
+    """Usage writes are handed to a thread so they don't stall the token stream.
+
+    That makes them racy: the client refreshes the cost page off `done`, so every
+    row has to have landed by the time that event goes out.
+    """
+    import time
+
+    def slow_record(**kw):
+        time.sleep(0.05)  # a real blocking write, of the kind that must not block the loop
+        recorded["usage"].append(kw)
+
+    monkeypatch.setattr(db, "record_usage", slow_record)
+    monkeypatch.setattr(main, "build_model", lambda **kw: ScriptedModel(
+        script=[plan_reply(), AIMessage(content="ok", usage_metadata=usage())]
+    ))
+    monkeypatch.setattr(main.app.state, "mcp_search", None, raising=False)
+
+    rows_at_done: list[int] = []
+
+    class WatchedQueue(asyncio.Queue):
+        async def put(self, item):
+            if isinstance(item, dict) and item.get("t") == "done":
+                rows_at_done.append(len(recorded["usage"]))
+            await super().put(item)
+
+    queue = WatchedQueue()
+    ctx = RunContext(queue, "user-1", "chat-1")
+    task = asyncio.create_task(_run_episode(request_for(), ctx, queue))
+    await drain(queue)
+    await task
+
+    assert recorded["usage"], "no usage rows were recorded"
+    assert rows_at_done == [len(recorded["usage"])], "done fired before the usage writes settled"
