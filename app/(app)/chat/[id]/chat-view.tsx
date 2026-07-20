@@ -265,6 +265,21 @@ export default function ChatView({
           }
         }
 
+        // The stream can end without a `message` event if the connection drops
+        // mid-run. Committing `finalText` blindly would append a silent empty
+        // bubble, so fall back to whatever already streamed and say so.
+        if (!finalText) {
+          if (!streamed.trim()) {
+            throw new Error("The connection dropped before the agent replied. Please try again.");
+          }
+          finalText = streamed;
+          steps.push({
+            kind: "error",
+            label: "Response interrupted",
+            detail: "The connection dropped before the agent finished — this reply may be incomplete.",
+          });
+        }
+
         setTurns((t) => [
           ...t,
           { kind: "assistant", id: `a-${Date.now()}`, text: finalText, steps },

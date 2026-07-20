@@ -129,9 +129,34 @@ export async function POST(req: Request) {
     );
   }
 
-  // Pass the SSE stream through untouched — the wire format is exactly what
-  // chat-view.tsx already parses.
-  return new Response(upstream.body, {
+  // Pass the SSE frames through untouched — the wire format is exactly what
+  // chat-view.tsx already parses — but watch for a terminal event on the way
+  // past. The agent service refunds the credit when it catches an exception, so
+  // a stream that ends without `done` or `error` means it died without getting
+  // the chance: the function timed out, the process crashed, a proxy cut it.
+  // Nothing downstream can refund that, so do it here.
+  const decoder = new TextDecoder();
+  let sawTerminal = false;
+
+  const watch = new TransformStream<Uint8Array, Uint8Array>({
+    transform(chunk, controller) {
+      if (!sawTerminal && /"t":\s*"(done|error)"/.test(decoder.decode(chunk, { stream: true }))) {
+        sawTerminal = true;
+      }
+      controller.enqueue(chunk);
+    },
+    async flush() {
+      if (sawTerminal) return;
+      await admin.rpc("grant_credits", {
+        p_user: user.id,
+        p_amount: 1,
+        p_method: "refund",
+        p_event_id: null,
+      });
+    },
+  });
+
+  return new Response(upstream.body.pipeThrough(watch), {
     headers: {
       "content-type": "text/event-stream; charset=utf-8",
       "cache-control": "no-cache, no-transform",
