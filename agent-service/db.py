@@ -62,8 +62,17 @@ def save_assistant_message(
     ).execute()
 
 
+# Signed URLs last a year: the download card stays on an old chat forever, and
+# a link that 404s months later reads as a broken app.
+REPORT_URL_TTL_SECONDS = 60 * 60 * 24 * 365
+
+
 def upload_report(*, user_id: str, chat_id: str, title: str, pdf: bytes) -> str:
-    """Uploads to the public `reports` bucket and returns the public URL."""
+    """Uploads to the private `reports` bucket and returns a signed URL.
+
+    The leading path segment is the owner's id, which is what the bucket's RLS
+    policy checks.
+    """
     import re
     import time
 
@@ -76,7 +85,13 @@ def upload_report(*, user_id: str, chat_id: str, title: str, pdf: bytes) -> str:
         file=pdf,
         file_options={"content-type": "application/pdf", "upsert": "true"},
     )
-    return storage.get_public_url(path)
+    signed = storage.create_signed_url(path, REPORT_URL_TTL_SECONDS)
+    url = signed.get("signedURL")
+    if not url:
+        # Better to fail the turn (and refund) than to hand back a card that
+        # downloads nothing.
+        raise RuntimeError(f"could not sign a URL for {path}")
+    return url
 
 
 def save_artifact(*, chat_id: str, user_id: str, title: str, url: str) -> None:

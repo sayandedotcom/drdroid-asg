@@ -174,6 +174,14 @@ begin
     end;
   end if;
 
+  -- Self-heal a missing profile row before granting. on_auth_user_created
+  -- normally creates it at signup, but a user who signed in before that trigger
+  -- existed -- or one whose trigger run failed -- would otherwise fall through
+  -- the update below matching zero rows.
+  insert into public.profiles (id, email)
+  select p_user, u.email from auth.users u where u.id = p_user
+  on conflict (id) do nothing;
+
   update public.profiles
      set credits = credits + p_amount,
          unlocked = true,
@@ -181,7 +189,16 @@ begin
    where id = p_user
   returning credits into total;
 
-  return coalesce(total, 0);
+  -- A grant that granted nothing must never report success: the caller would
+  -- tell the user "5 credits added" and then bounce them back to the paywall.
+  -- Raising also rolls back the stripe_events row inserted above, so the retry
+  -- is not swallowed by the dedupe branch.
+  if total is null then
+    raise exception 'grant_credits: no profile row for user %', p_user
+      using errcode = 'no_data_found';
+  end if;
+
+  return total;
 end;
 $$;
 
@@ -189,10 +206,19 @@ revoke all on function public.grant_credits(uuid, int, text, text) from public, 
 revoke all on function public.spend_credit(uuid) from public, anon, authenticated;
 
 -- ------------------------------------------------------------- storage
+-- Private: research reports are user data, and object paths are guessable
+-- enough that a public bucket would leak them. The service issues signed URLs.
 insert into storage.buckets (id, name, public)
-values ('reports', 'reports', true)
-on conflict (id) do update set public = true;
+values ('reports', 'reports', false)
+on conflict (id) do update set public = false;
 
 drop policy if exists "public read reports" on storage.objects;
-create policy "public read reports" on storage.objects
-  for select using (bucket_id = 'reports');
+drop policy if exists "own reports read" on storage.objects;
+
+-- Paths are `<user_id>/<chat_id>/<file>.pdf`, so the first path segment is the
+-- owner (see upload_report in agent-service/db.py).
+create policy "own reports read" on storage.objects
+  for select using (
+    bucket_id = 'reports'
+    and auth.uid()::text = (storage.foldername(name))[1]
+  );
