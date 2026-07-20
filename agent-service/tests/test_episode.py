@@ -225,7 +225,7 @@ async def test_conversational_turn_makes_no_pdf(recorded, fake_rest_search, monk
     ]
     events, _ = await run_with(script, monkeypatch)
 
-    assert [e["t"] for e in events if e["t"] != "step"] == ["message", "done"]
+    assert [e["t"] for e in events if e["t"] not in {"step", "delta"}] == ["message", "done"]
     assert not recorded["artifacts"]
     # Planning call plus the answer; NO_PLAN adds no step to the timeline.
     assert len(recorded["usage"]) == 2
@@ -460,6 +460,80 @@ async def test_step_limit_still_reports_rather_than_returning_the_plan(
     text = next(e for e in events if e["t"] == "message")["text"]
     assert "step limit" in text
     assert "research plan" not in text
+
+
+async def test_answer_streams_before_the_final_message(recorded, fake_rest_search, monkeypatch):
+    """Deltas must arrive first and reconstruct exactly what `message` sends."""
+    script = [
+        plan_reply("NO_PLAN"),
+        AIMessage(content="Paris is the capital of France.", usage_metadata=usage()),
+    ]
+    events, _ = await run_with(script, monkeypatch)
+
+    kinds = [e["t"] for e in events if e["t"] in {"delta", "message"}]
+    assert kinds[0] == "delta" and kinds[-1] == "message"
+
+    streamed = "".join(e["text"] for e in events if e["t"] == "delta")
+    assert streamed == next(e for e in events if e["t"] == "message")["text"]
+
+    # Usage survives accumulation across chunks; billing must not go to zero.
+    assert recorded["usage"][-1]["input_tokens"] == 1000
+
+
+async def test_revision_restarts_the_stream(recorded, fake_rest_search, monkeypatch):
+    """Otherwise the revised answer would append to the draft in the UI."""
+    script = [
+        plan_reply("1. Look it up"),
+        AIMessage(
+            content="",
+            tool_calls=[{"name": "web_search", "args": {"query": "q"}, "id": "c1"}],
+            usage_metadata=usage(),
+        ),
+        AIMessage(content="Draft.", usage_metadata=usage()),
+        critique_reply("- Fix the unsupported claim."),
+        AIMessage(content="Revised.", usage_metadata=usage()),
+    ]
+    events, _ = await run_with(script, monkeypatch)
+
+    deltas = [e for e in events if e["t"] == "delta"]
+    # Two separate answers streamed, each opening with a restart marker.
+    assert [d.get("restart") for d in deltas] == [True, True]
+    assert [d["text"] for d in deltas] == ["Draft.", "Revised."]
+    assert next(e for e in events if e["t"] == "message")["text"] == "Revised."
+
+
+async def test_streaming_failure_falls_back_to_a_plain_call(
+    recorded, fake_rest_search, monkeypatch
+):
+    """A provider that rejects stream_options must still produce an answer."""
+
+    class NoStreamModel(ScriptedModel):
+        def bind_tools(self, tools, **kwargs):
+            return self
+
+        async def astream(self, *a, **kw):
+            raise RuntimeError("stream_options is not supported")
+            yield  # pragma: no cover — makes this an async generator
+
+    monkeypatch.setattr(
+        main,
+        "build_model",
+        lambda **kw: NoStreamModel(script=[
+            plan_reply("NO_PLAN"),
+            AIMessage(content="Answered without streaming.", usage_metadata=usage()),
+        ]),
+    )
+    monkeypatch.setattr(main.app.state, "mcp_search", None, raising=False)
+
+    queue: asyncio.Queue = asyncio.Queue()
+    ctx = RunContext(queue, "user-1", "chat-1")
+    task = asyncio.create_task(_run_episode(request_for(), ctx, queue))
+    events = await drain(queue)
+    await task
+
+    assert not [e for e in events if e["t"] == "delta"]
+    assert next(e for e in events if e["t"] == "message")["text"] == "Answered without streaming."
+    assert recorded["usage"][-1]["input_tokens"] == 1000
 
 
 async def test_done_event_carries_remaining_credits(recorded, fake_rest_search, monkeypatch):

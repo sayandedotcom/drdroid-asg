@@ -99,6 +99,41 @@ def _usage_from(message: AIMessage) -> tuple[int, int, int]:
     return input_tokens, output_tokens, cached
 
 
+async def _stream_answer(
+    bound: Any, messages: list[BaseMessage], ctx: RunContext, streaming: dict
+) -> AIMessage:
+    """Runs one model call, forwarding answer text to the client as it arrives.
+
+    Tool-call turns emit no content, so in practice deltas only appear for text
+    the user is going to read. Each call's first delta is marked `restart` so a
+    revised answer replaces the draft in the UI instead of appending to it.
+
+    Falls back to a plain call if the provider rejects streaming — not every
+    OpenAI-compatible endpoint accepts stream_options, and a working answer
+    matters more than a live-typing effect.
+    """
+    if streaming["on"]:
+        try:
+            response: Any = None
+            first = True
+            async for chunk in bound.astream(messages):
+                response = chunk if response is None else response + chunk
+                text = chunk.content if isinstance(chunk.content, str) else ""
+                if text:
+                    event = {"t": "delta", "text": text}
+                    if first:
+                        event["restart"] = True
+                        first = False
+                    await ctx.emit(event)
+            if response is not None:
+                return response
+        except Exception as exc:  # noqa: BLE001
+            print(f"[stream] disabled after failure, falling back to a plain call: {exc}")
+            streaming["on"] = False
+
+    return await bound.ainvoke(messages)
+
+
 def build_graph(
     *,
     ctx: RunContext,
@@ -110,6 +145,7 @@ def build_graph(
     bound = model.bind_tools(tools) if tools else model
     call_count = {"n": 0}
     agent_turns = {"n": 0}
+    streaming = {"on": True}
 
     async def track(response: AIMessage) -> None:
         call_count["n"] += 1
@@ -148,7 +184,7 @@ def build_graph(
             label = "Reviewing what I found"
         await ctx.step("thinking", label)
 
-        response = await bound.ainvoke(state["messages"])
+        response = await _stream_answer(bound, state["messages"], ctx, streaming)
         await track(response)
         return {"messages": [response]}
 
@@ -229,6 +265,9 @@ def build_model(*, model: str, base_url: str, api_key: str) -> ChatOpenAI:
         max_tokens=8000,
         timeout=180,
         max_retries=2,
+        # Without this the streamed response carries no token counts and every
+        # usage row would be written as zero-cost.
+        stream_usage=True,
     )
 
 
