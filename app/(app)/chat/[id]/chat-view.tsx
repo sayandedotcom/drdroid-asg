@@ -54,6 +54,22 @@ function StepIcon({ kind }: { kind: string }) {
         <path d="M9 2v3h3" />
       </svg>
     );
+  if (kind === "plan")
+    return (
+      <svg viewBox="0 0 16 16" className={cls} fill="none" stroke="currentColor" strokeWidth="1.6">
+        <circle cx="3.5" cy="4" r="1" />
+        <circle cx="3.5" cy="8" r="1" />
+        <circle cx="3.5" cy="12" r="1" />
+        <path d="M6.5 4h7M6.5 8h7M6.5 12h7" strokeLinecap="round" />
+      </svg>
+    );
+  if (kind === "critique")
+    return (
+      <svg viewBox="0 0 16 16" className={cls} fill="none" stroke="currentColor" strokeWidth="1.6">
+        <circle cx="8" cy="8" r="5.5" />
+        <path d="m5.75 8 1.75 1.75 3-3.5" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+    );
   if (kind === "error")
     return (
       <svg viewBox="0 0 16 16" className={cls} fill="none" stroke="currentColor" strokeWidth="1.6">
@@ -155,6 +171,7 @@ export default function ChatView({
   const [input, setInput] = useState("");
   const [running, setRunning] = useState(false);
   const [liveSteps, setLiveSteps] = useState<Step[]>([]);
+  const [draft, setDraft] = useState("");
   const [error, setError] = useState<string | null>(null);
 
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -162,7 +179,7 @@ export default function ChatView({
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [turns, liveSteps, running]);
+  }, [turns, liveSteps, draft, running]);
 
   const send = useCallback(
     async (text: string) => {
@@ -172,6 +189,7 @@ export default function ChatView({
       setRunning(true);
       setError(null);
       setLiveSteps([]);
+      setDraft("");
       setInput("");
       setTurns((t) => [...t, { kind: "user", id: `tmp-${Date.now()}`, text: prompt }]);
 
@@ -192,6 +210,7 @@ export default function ChatView({
         let buffer = "";
         const steps: Step[] = [];
         let finalText = "";
+        let streamed = "";
 
         while (true) {
           const { done, value } = await reader.read();
@@ -229,6 +248,11 @@ export default function ChatView({
                   created_at: new Date().toISOString(),
                 },
               ]);
+            } else if (ev.t === "delta") {
+              // `restart` marks a fresh answer — a revision after the agent's
+              // self-review replaces the draft rather than appending to it.
+              streamed = ev.restart ? String(ev.text) : streamed + String(ev.text);
+              setDraft(streamed);
             } else if (ev.t === "message") {
               finalText = String(ev.text);
             } else if (ev.t === "done") {
@@ -246,10 +270,12 @@ export default function ChatView({
           { kind: "assistant", id: `a-${Date.now()}`, text: finalText, steps },
         ]);
         setLiveSteps([]);
+        setDraft("");
         router.refresh();
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err));
         setLiveSteps([]);
+        setDraft("");
       } finally {
         setRunning(false);
       }
@@ -301,7 +327,12 @@ export default function ChatView({
           {running && (
             <div className="mb-10">
               <StepList steps={liveSteps} live />
-              {liveSteps.length === 0 && (
+              {draft && (
+                <div className="prose-mm text-sm text-ink-200">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{draft}</ReactMarkdown>
+                </div>
+              )}
+              {liveSteps.length === 0 && !draft && (
                 <p className="mm-pulse text-xs text-ink-500">Starting…</p>
               )}
             </div>
