@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { MODELS } from "@/lib/models";
+import { modelsFor, type Provider } from "@/lib/models";
 
 const EXAMPLES = [
   "Create a report explaining the recent forest fires in California — what is causing them and what can be done to avoid them.",
@@ -10,8 +10,17 @@ const EXAMPLES = [
   "Compare the current state of solid-state batteries across the main players.",
 ];
 
-export default function NewChatComposer({ model }: { model: string }) {
+export default function NewChatComposer({
+  model,
+  provider,
+}: {
+  model: string;
+  provider: Provider;
+}) {
   const router = useRouter();
+  // Only the saved key's own models: picking, say, GPT-5 while an Anthropic key
+  // is on file would POST that model id to api.anthropic.com and fail mid-turn.
+  const available = modelsFor(provider);
   const [text, setText] = useState("");
   const [chosen, setChosen] = useState(model);
   const [busy, setBusy] = useState(false);
@@ -68,7 +77,7 @@ export default function NewChatComposer({ model }: { model: string }) {
               onChange={(e) => setChosen(e.target.value)}
               className="max-w-[60%] truncate rounded-md border border-ink-700 bg-ink-850 px-2 py-1.5 text-xs text-ink-300 outline-none focus:border-ember-600"
             >
-              {MODELS.map((m) => (
+              {available.map((m) => (
                 <option key={m.id} value={m.id}>
                   {m.label}
                 </option>

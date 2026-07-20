@@ -8,7 +8,7 @@ export default async function ChatIndex() {
   const user = await currentUser();
   const { data: config } = await supabaseAdmin()
     .from("llm_configs")
-    .select("default_model")
+    .select("default_model, provider")
     .eq("user_id", user!.id)
     .maybeSingle();
 
@@ -24,7 +24,7 @@ export default async function ChatIndex() {
         </p>
 
         {config ? (
-          <NewChatComposer model={config.default_model} />
+          <NewChatComposer model={config.default_model} provider={config.provider} />
         ) : (
           <div className="mt-8 rounded-xl border border-ember-600/40 bg-ember-500/[0.07] p-5">
             <h2 className="text-sm font-medium text-ink-100">Add your API key first</h2>

@@ -10,19 +10,27 @@ export async function POST(req: Request) {
 
   const { model } = (await req.json().catch(() => ({}))) as { model?: string };
 
+  const { data: config } = await supabaseAdmin()
+    .from("llm_configs")
+    .select("default_model, provider")
+    .eq("user_id", user.id)
+    .maybeSingle();
+
   // Fall back to the model saved in Settings.
-  let chosen = model;
-  if (!chosen || !modelSpec(chosen)) {
-    const { data: config } = await supabaseAdmin()
-      .from("llm_configs")
-      .select("default_model")
-      .eq("user_id", user.id)
-      .maybeSingle();
-    chosen = config?.default_model;
+  const chosen = model && modelSpec(model) ? model : config?.default_model;
+  const spec = chosen ? modelSpec(chosen) : undefined;
+
+  if (!chosen || !spec) {
+    return NextResponse.json({ error: "Add your API key in Settings first." }, { status: 400 });
   }
 
-  if (!chosen || !modelSpec(chosen)) {
-    return NextResponse.json({ error: "Add your API key in Settings first." }, { status: 400 });
+  // The stored key only authenticates against its own provider's endpoint, so a
+  // cross-provider model would fail mid-turn with a raw upstream error.
+  if (config?.provider && spec.provider !== config.provider) {
+    return NextResponse.json(
+      { error: `Your saved key is for ${config.provider}, so it can't run ${spec.label}.` },
+      { status: 400 }
+    );
   }
 
   const sb = await supabaseServer();
