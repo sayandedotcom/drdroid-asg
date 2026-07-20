@@ -21,7 +21,13 @@ Browser ── SSE ──> Next.js /api/chat            (Vercel project 1)
                         │  streams SSE straight back, unmodified
                         ▼
                    FastAPI /run                  (Vercel project 2, ./agent-service)
-                     LangGraph StateGraph:  agent ⇄ tools,  ≤10 model calls
+                     LangGraph StateGraph, ≤12 model calls:
+
+                       plan ──> agent ──> tools ──┐
+                                 ^  │  ^──────────┘
+                                 │  v
+                                 └ critique ──> END
+
                      ├─ web_search      → Tavily MCP, falling back to Tavily REST
                      ├─ create_pdf_report → fpdf2 → Supabase Storage
                      └─ per model call: usage_events row, priced for that model
@@ -36,9 +42,27 @@ and its per-step instrumentation legible, rather than burying them in a hand-rol
 Everything that is *not* the agent — auth, paywall, credits, key management — stays in Next.js
 where it already works.
 
-**Why an explicit graph rather than a prebuilt ReAct agent.** Usage has to be recorded after every
-individual model call, because one user turn with a five-step research loop must produce five
-costed rows. The `agent` node writes a `usage_events` row on each pass.
+**Why an explicit graph rather than a prebuilt ReAct agent.** Two reasons. Usage has to be
+recorded after every individual model call, because one user turn with a five-step research loop
+must produce five costed rows. And the loop is not a bare ReAct cycle — there is a planning pass
+before it and a reflection pass after it, which is exactly the kind of topology a `StateGraph`
+with conditional edges expresses and a prebuilt agent does not.
+
+### The three passes
+
+| Node | What it does | When it runs |
+|---|---|---|
+| `plan` | Drafts a short numbered research plan, or answers `NO_PLAN` | Every turn (entry point) |
+| `agent` ⇄ `tools` | The research loop: search, read, write the report | Every turn |
+| `critique` | Re-reads the draft against the sources gathered; either approves it or sends back specific fixes for **one** revision | Only when the turn used tools |
+
+Reflection is bounded on purpose: once per turn, only on turns that actually researched
+something, and only when a model call remains in budget for the revision it might request.
+Without those bounds a stubborn critic could spend the user's money in a loop.
+
+Both extra passes cost a model call each, which is a deliberate trade: a turn is one credit
+regardless, so the cost lands on tokens rather than credits, and the usage page shows every call
+individually.
 
 ### Responsibility split
 
@@ -61,8 +85,13 @@ costed rows. The `agent` node writes a `usage_events` row on each pass.
 - **Bring your own key** — no model key ships with the app. Users add an OpenAI-compatible key
   and base URL; the key is verified with a live test call, then AES-256-GCM encrypted at rest.
   Anthropic, OpenAI and Moonshot presets are built in; any compatible endpoint works.
-- **Agentic loop** — up to 10 model calls per turn. The UI streams each step as it happens
-  (thinking, searching, reading N sources, writing the PDF).
+- **Agentic loop** — plan, research, then self-review, up to 12 model calls per turn. The UI
+  streams each step as it happens (planning, searching, reading N sources, writing the PDF,
+  reviewing the draft) and then streams the answer itself token by token.
+- **Grounded citations** — every page the agent opens is assigned a citation number that stays
+  stable for the whole turn, so `[2]` means the same source in the third search as in the
+  finished report. The report's Sources section is generated from that registry rather than
+  written by the model, so it cannot list a page that was never actually fetched.
 - **MCP** — the search tool is loaded from Tavily's remote MCP server at startup via
   `langchain-mcp-adapters`. If that connection is unavailable the tool falls back to Tavily's REST
   API, so a flaky MCP server degrades a run instead of breaking it. The step label records which
@@ -159,10 +188,17 @@ cd agent-service && .venv/bin/python -m pytest -q
 ```
 
 The suite runs with **no live LLM key**. A scripted chat model replays a full research turn —
-search, then PDF, then answer — and the tests assert the SSE event sequence, that one
+plan, search, PDF, answer, review — and the tests assert the SSE event sequence, that one
 `usage_events` row is written per model call, that cached tokens are priced at the cache-read
 rate, that the loop terminates at its step limit, that a provider failure refunds the credit, and
 that a broken MCP connection falls back to REST without breaking the run.
+
+They also cover the behaviour that is easy to get subtly wrong: that a critique which finds gaps
+changes the answer the user finally sees and runs exactly once, that a turn which did no research
+is never critiqued, that citation numbers are global across searches rather than restarting each
+time, that the generated Sources list contains only pages that were really fetched, that streamed
+deltas reconstruct the final message exactly, and that a revision restarts the stream instead of
+appending to the draft it replaces.
 
 `test_pricing.py` parses `lib/models.ts` and asserts the Python rate table matches it, so the
 numbers a reviewer sees on the usage page cannot silently drift from what was billed.
@@ -177,8 +213,9 @@ numbers a reviewer sees on the usage page cannot silently drift from what was bi
 3. In Settings, pick a provider and model and paste your API key. The app makes one small test
    call before saving, so a bad key fails immediately rather than mid-conversation.
 4. Ask something that needs research, e.g. *"Create a report explaining the recent forest fires in
-   California, what is causing them and what can be done to avoid them."* Watch the step timeline;
-   a PDF card appears when the report is ready.
+   California, what is causing them and what can be done to avoid them."* Watch the step timeline:
+   the plan appears first, then the searches, then the review of the draft. The answer types out
+   as it is generated, and a PDF card appears when the report is ready.
 5. Ask a follow-up in the same chat to confirm it holds context.
 6. Open **Usage & cost** for the per-chat token and cost breakdown.
 
