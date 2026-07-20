@@ -27,13 +27,22 @@ export async function POST(req: Request) {
 
   // Verify the key works before saving, so failures surface here rather than
   // mid-conversation after a credit has been spent.
+  //
+  // The token cap has to be spelled two different ways: the reasoning models
+  // (gpt-5, gpt-5-mini) reject `max_tokens` and require `max_completion_tokens`,
+  // while the Anthropic and Moonshot compatibility endpoints only know the
+  // former. Try the common spelling, then retry with the other rather than
+  // telling someone their perfectly good key doesn't work.
   try {
     const client = new OpenAI({ apiKey: key, baseURL: baseUrl.trim(), maxRetries: 0, timeout: 30_000 });
-    await client.chat.completions.create({
-      model,
-      max_tokens: 8,
-      messages: [{ role: "user", content: "Reply with the word: ok" }],
-    });
+    const probe = { model, messages: [{ role: "user" as const, content: "Reply with the word: ok" }] };
+    try {
+      await client.chat.completions.create({ ...probe, max_tokens: 16 });
+    } catch (first) {
+      const msg = first instanceof Error ? first.message : String(first);
+      if (!/max_tokens|max_completion_tokens/i.test(msg)) throw first;
+      await client.chat.completions.create({ ...probe, max_completion_tokens: 16 });
+    }
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     return NextResponse.json(

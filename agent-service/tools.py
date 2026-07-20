@@ -11,8 +11,8 @@ import httpx
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
-# Byte-identical to SYSTEM_PROMPT in lib/tools.ts. Keep it that way: a stable
-# prefix is what lets provider-side automatic prompt caching hit on later turns.
+# Kept byte-stable across turns so it can sit in a cacheable prefix wherever the
+# provider supports one. See pricing.py for how cache reads are billed.
 SYSTEM_PROMPT = """You are MicroManus, a deep research agent.
 
 You have two tools: web_search (search and read live web pages) and create_pdf_report (produce a downloadable PDF).
