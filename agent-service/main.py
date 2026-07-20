@@ -22,7 +22,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 import db
-from graph import build_graph, build_model, final_text, initial_messages
+from graph import RECURSION_LIMIT, build_graph, build_model, final_text, initial_messages
 from pricing import cost_of
 from tools import RunContext, build_report_tool, build_search_tool
 
@@ -123,7 +123,7 @@ async def _run_episode(req: RunRequest, ctx: RunContext, queue: asyncio.Queue) -
         history = [{"role": t.role, "content": t.content} for t in req.history]
         state = await graph.ainvoke(
             {"messages": initial_messages(history, req.message)},
-            config={"recursion_limit": 21},
+            config={"recursion_limit": RECURSION_LIMIT},
         )
 
         text = final_text(state)

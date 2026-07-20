@@ -1,10 +1,11 @@
 """The research loop, as a LangGraph StateGraph.
 
-    agent ──(tool_calls?)──> tools ──> agent ──> END
+    plan ──> agent ──(tool_calls?)──> tools ──> agent ──> END
 
-An explicit graph rather than a prebuilt react agent, because usage has to be
-recorded after every individual model call: one user turn with a five-step loop
-must produce five costed usage_events rows.
+An explicit graph rather than a prebuilt react agent, for two reasons: usage has
+to be recorded after every individual model call (one user turn with a five-step
+loop must produce five costed usage_events rows), and the loop is not a bare
+react cycle — a planning pass runs first.
 """
 
 from __future__ import annotations
@@ -19,13 +20,32 @@ from langgraph.prebuilt import ToolNode
 
 from tools import SYSTEM_PROMPT, RunContext
 
-MAX_MODEL_CALLS = 10
-# One agent->tools->agent cycle is two graph steps, plus the final agent turn.
-RECURSION_LIMIT = MAX_MODEL_CALLS * 2 + 1
+MAX_MODEL_CALLS = 12
+# One agent->tools->agent cycle is two graph steps; plus the plan pass and the
+# final agent turn, with margin.
+RECURSION_LIMIT = MAX_MODEL_CALLS * 2 + 6
+
+# Marks messages this service injected rather than the user or the model, so
+# final_text() can tell them apart from a real reply.
+INTERNAL = {"micromanus_internal": True}
+
+PLAN_INSTRUCTION = """Before you answer, decide whether this needs live research.
+
+If it does, reply with a short numbered research plan — at most four steps, one line each, naming what you will search for and why. Nothing else.
+If you can answer it directly without searching, reply with exactly: NO_PLAN"""
 
 
 class State(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
+
+
+def _is_internal(message: BaseMessage) -> bool:
+    return bool((getattr(message, "additional_kwargs", None) or {}).get("micromanus_internal"))
+
+
+def _text_of(message: BaseMessage) -> str:
+    content = getattr(message, "content", "")
+    return content.strip() if isinstance(content, str) else ""
 
 
 def _usage_from(message: AIMessage) -> tuple[int, int, int]:
@@ -68,15 +88,42 @@ def build_graph(
     """Compiles the graph. `model` is any chat model; tests pass a fake one."""
     bound = model.bind_tools(tools) if tools else model
     call_count = {"n": 0}
+    agent_turns = {"n": 0}
+
+    async def track(response: AIMessage) -> None:
+        call_count["n"] += 1
+        on_usage(*_usage_from(response))
+
+    async def plan(state: State) -> dict:
+        """Decide what to research before researching it.
+
+        Unbound (no tools) so this pass can only think, not act. A question that
+        needs no research answers NO_PLAN and costs one cheap call.
+        """
+        response = await model.ainvoke(
+            [*state["messages"], HumanMessage(content=PLAN_INSTRUCTION)]
+        )
+        await track(response)
+
+        text = _text_of(response)
+        if not text or "NO_PLAN" in text.upper():
+            return {}
+
+        await ctx.step("plan", "Planned the research", text)
+        return {
+            "messages": [
+                AIMessage(content=f"My research plan:\n{text}", additional_kwargs=INTERNAL)
+            ]
+        }
 
     async def agent(state: State) -> dict:
-        call_count["n"] += 1
+        agent_turns["n"] += 1
         await ctx.step(
-            "thinking", "Thinking" if call_count["n"] == 1 else "Reviewing what I found"
+            "thinking", "Thinking" if agent_turns["n"] == 1 else "Reviewing what I found"
         )
 
         response = await bound.ainvoke(state["messages"])
-        on_usage(*_usage_from(response))
+        await track(response)
         return {"messages": [response]}
 
     async def should_continue(state: State) -> str:
@@ -86,9 +133,11 @@ def build_graph(
         return END
 
     graph = StateGraph(State)
+    graph.add_node("plan", plan)
     graph.add_node("agent", agent)
     graph.add_node("tools", ToolNode(tools))
-    graph.set_entry_point("agent")
+    graph.set_entry_point("plan")
+    graph.add_edge("plan", "agent")
     graph.add_conditional_edges("agent", should_continue, {"tools": "tools", END: END})
     graph.add_edge("tools", "agent")
     return graph.compile()
@@ -126,10 +175,16 @@ def final_text(state: dict) -> str:
     Stops at the current user message: if the loop ran out of steps every
     AIMessage it produced is an empty tool call, and scanning further back would
     return a stale reply from an earlier turn instead of saying what happened.
+
+    Messages this service injected (the research plan, reviewer feedback) are
+    skipped rather than stopped at — the plan is not an answer, and skipping the
+    feedback lets a failed revision fall back to the draft it was revising.
     """
     for message in reversed(state["messages"]):
+        if _is_internal(message):
+            continue
         if isinstance(message, HumanMessage):
             break
-        if isinstance(message, AIMessage) and isinstance(message.content, str) and message.content.strip():
+        if isinstance(message, AIMessage) and _text_of(message):
             return message.content
     return "I reached my step limit before finishing. Ask me to continue and I'll pick up from here."

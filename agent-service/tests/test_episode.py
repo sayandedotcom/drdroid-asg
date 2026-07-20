@@ -42,6 +42,11 @@ class ScriptedModel(BaseChatModel):
         return ChatResult(generations=[ChatGeneration(message=message)])
 
 
+def plan_reply(text: str = "NO_PLAN", **kw) -> AIMessage:
+    """The graph's first model call is always the planning pass."""
+    return AIMessage(content=text, usage_metadata=usage(**kw))
+
+
 def usage(input_tokens=1000, output_tokens=60, cached=0) -> dict[str, Any]:
     return {
         "input_tokens": input_tokens,
@@ -115,8 +120,9 @@ async def run_with(script: list, monkeypatch) -> tuple[list[dict], RunContext]:
 
 
 async def test_full_research_turn(recorded, fake_rest_search, monkeypatch):
-    """Search, then write a PDF, then answer — the flagship demo path."""
+    """Plan, search, write a PDF, then answer — the flagship demo path."""
     script = [
+        plan_reply("1. Search for causes of the 2025 fires\n2. Search for mitigation policy"),
         AIMessage(
             content="",
             tool_calls=[{"name": "web_search", "args": {"query": "california wildfire causes"}, "id": "c1"}],
@@ -152,19 +158,23 @@ async def test_full_research_turn(recorded, fake_rest_search, monkeypatch):
     message = next(e for e in events if e["t"] == "message")
     assert message["text"] == "Your report is ready. It covers causes and mitigation."
 
-    # The step timeline the UI renders.
+    # The step timeline the UI renders. The plan is announced before the work.
     step_kinds = [e["kind"] for e in events if e["t"] == "step"]
+    assert step_kinds[0] == "plan"
     assert step_kinds.count("thinking") == 3
     assert "search" in step_kinds and "read" in step_kinds and "pdf" in step_kinds
 
-    # One usage row per model call, not per turn.
-    assert len(recorded["usage"]) == 3
-    assert [u["input_tokens"] for u in recorded["usage"]] == [1200, 3000, 4200]
-    assert [u["cached_tokens"] for u in recorded["usage"]] == [0, 1000, 2800]
+    plan_step = next(e for e in events if e.get("kind") == "plan")
+    assert "Search for causes" in plan_step["detail"]
+
+    # One usage row per model call, not per turn — planning included.
+    assert len(recorded["usage"]) == 4
+    assert [u["input_tokens"] for u in recorded["usage"]] == [1000, 1200, 3000, 4200]
+    assert [u["cached_tokens"] for u in recorded["usage"]] == [0, 0, 1000, 2800]
 
     # Cost must price cached tokens at the cache-read rate:
     #   (3000-1000)*3/1M + 1000*0.3/1M + 900*15/1M
-    assert recorded["usage"][1]["cost_usd"] == pytest.approx(
+    assert recorded["usage"][2]["cost_usd"] == pytest.approx(
         (2000 * 3 + 1000 * 0.3 + 900 * 15) / 1_000_000
     )
 
@@ -181,12 +191,17 @@ async def test_full_research_turn(recorded, fake_rest_search, monkeypatch):
 
 
 async def test_conversational_turn_makes_no_pdf(recorded, fake_rest_search, monkeypatch):
-    script = [AIMessage(content="Paris is the capital of France.", usage_metadata=usage())]
+    script = [
+        plan_reply("NO_PLAN"),
+        AIMessage(content="Paris is the capital of France.", usage_metadata=usage()),
+    ]
     events, _ = await run_with(script, monkeypatch)
 
     assert [e["t"] for e in events if e["t"] != "step"] == ["message", "done"]
     assert not recorded["artifacts"]
-    assert len(recorded["usage"]) == 1
+    # Planning call plus the answer; NO_PLAN adds no step to the timeline.
+    assert len(recorded["usage"]) == 2
+    assert not [e for e in events if e.get("kind") == "plan"]
 
 
 async def test_failure_refunds_the_credit(recorded, fake_rest_search, monkeypatch):
@@ -203,7 +218,7 @@ async def test_failure_refunds_the_credit(recorded, fake_rest_search, monkeypatc
 
 async def test_loop_stops_at_the_step_limit(recorded, fake_rest_search, monkeypatch):
     """A model that only ever calls tools must terminate, not run forever."""
-    script = [
+    script = [plan_reply("1. Search endlessly")] + [
         AIMessage(
             content="",
             tool_calls=[{"name": "web_search", "args": {"query": f"q{i}"}, "id": f"c{i}"}],
@@ -213,7 +228,7 @@ async def test_loop_stops_at_the_step_limit(recorded, fake_rest_search, monkeypa
     ]
     events, _ = await run_with(script, monkeypatch)
 
-    assert len(recorded["usage"]) == 10  # MAX_MODEL_CALLS
+    assert len(recorded["usage"]) == 12  # MAX_MODEL_CALLS, planning included
     message = next(e for e in events if e["t"] == "message")
     assert "step limit" in message["text"]
 
@@ -228,6 +243,7 @@ async def test_search_falls_back_to_rest_when_mcp_fails(recorded, fake_rest_sear
             raise RuntimeError("mcp transport closed")
 
     monkeypatch.setattr(main, "build_model", lambda **kw: ScriptedModel(script=[
+        plan_reply("1. Search battery chemistry"),
         AIMessage(
             content="",
             tool_calls=[{"name": "web_search", "args": {"query": "solid state batteries"}, "id": "c1"}],
@@ -257,6 +273,7 @@ async def test_search_uses_mcp_when_available(recorded, fake_rest_search, monkey
             return "[1] MCP result\nURL: https://example.com/mcp\nBody text."
 
     monkeypatch.setattr(main, "build_model", lambda **kw: ScriptedModel(script=[
+        plan_reply("1. Search it"),
         AIMessage(
             content="",
             tool_calls=[{"name": "web_search", "args": {"query": "q"}, "id": "c1"}],
@@ -279,10 +296,8 @@ async def test_search_uses_mcp_when_available(recorded, fake_rest_search, monkey
 
 async def test_done_event_carries_remaining_credits(recorded, fake_rest_search, monkeypatch):
     """The UI counter reads this; without it the balance goes stale."""
-    from langchain_core.messages import AIMessage as _AIMessage
-
     monkeypatch.setattr(main, "build_model", lambda **kw: ScriptedModel(
-        script=[_AIMessage(content="ok", usage_metadata=usage())]
+        script=[plan_reply(), AIMessage(content="ok", usage_metadata=usage())]
     ))
     monkeypatch.setattr(main.app.state, "mcp_search", None, raising=False)
 

@@ -51,14 +51,17 @@ def test_run_streams_sse_frames(client, monkeypatch):
     """A correctly authenticated call returns parseable SSE, not JSON."""
     from langchain_core.messages import AIMessage
 
-    from tests.test_episode import ScriptedModel
+    from tests.test_episode import ScriptedModel, plan_reply
 
     monkeypatch.setattr(
         main,
         "build_model",
-        lambda **kw: ScriptedModel(script=[AIMessage(content="Hi there.", usage_metadata={
-            "input_tokens": 10, "output_tokens": 3, "total_tokens": 13,
-        })]),
+        lambda **kw: ScriptedModel(script=[
+            plan_reply(),
+            AIMessage(content="Hi there.", usage_metadata={
+                "input_tokens": 10, "output_tokens": 3, "total_tokens": 13,
+            }),
+        ]),
     )
     monkeypatch.setattr(main.db, "record_usage", lambda **kw: None)
     monkeypatch.setattr(main.db, "save_assistant_message", lambda **kw: None)
