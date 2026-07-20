@@ -192,9 +192,11 @@ export default async function UsagePage() {
         )}
 
         <p className="mt-4 text-xs leading-relaxed text-ink-600">
-          Cached tokens are a subset of input tokens, billed at the provider&apos;s cache-read rate.
-          MicroManus keeps the system prompt byte-stable across calls so providers can serve the
-          prefix from cache.
+          Cached tokens are a subset of input tokens, billed at the provider&apos;s cache-read rate
+          rather than the full input rate. MicroManus keeps the system prompt byte-stable so a
+          cacheable prefix exists, but whether a cache hit actually happens is up to the provider:
+          most require a minimum prefix length, and the OpenAI-compatible endpoints don&apos;t all
+          report cache reads back. This column stays at zero when nothing is reported.
         </p>
       </div>
     </div>

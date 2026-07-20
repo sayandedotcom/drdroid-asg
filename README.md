@@ -238,8 +238,14 @@ Cached counts are read from `usage_metadata.input_token_details.cache_read`, fal
 raw provider payload (`prompt_tokens_details.cached_tokens`, `cache_read_input_tokens`). A
 provider that reports none is treated as zero rather than failing.
 
-The system prompt is byte-stable across turns so provider-side automatic prompt caching can hit —
-that is what makes the cached-token column non-zero on later messages in a chat.
+The system prompt is byte-stable across turns so that a cacheable prefix exists, but be honest
+about what that buys you today: automatic prefix caching has a minimum length (a few thousand
+tokens on most providers) that a ~450-token system prompt does not reach on its own, and the
+OpenAI-compatible endpoints these models are reached through cannot express explicit cache
+breakpoints and don't consistently report cache reads back. So the accounting is real and correctly
+priced wherever a provider reports it — but expect the cached column to read zero on short chats.
+Earning a non-zero column reliably means talking to each provider's native API instead of the
+compatibility shim, which is the obvious next step and deliberately not in scope here.
 
 ---
 
@@ -251,6 +257,9 @@ that is what makes the cached-token column non-zero on later messages in a chat.
 - The agent service is not publicly usable: every request needs `AGENT_SERVICE_SECRET`, and it is
   only ever called server-to-server.
 - Every other table is protected by RLS scoped to `auth.uid()`.
+- Generated PDFs live in a **private** storage bucket. Objects are keyed
+  `<user_id>/<chat_id>/<file>.pdf` and the bucket policy checks that leading segment against
+  `auth.uid()`, so reports are reachable only through the signed URL issued to their owner.
 - Credit changes happen only inside `SECURITY DEFINER` functions (`spend_credit`,
   `grant_credits`); there is no client-side write path to the credits column.
 - The coupon check is a constant-time hash comparison.
