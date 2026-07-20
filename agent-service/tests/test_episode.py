@@ -47,6 +47,11 @@ def plan_reply(text: str = "NO_PLAN", **kw) -> AIMessage:
     return AIMessage(content=text, usage_metadata=usage(**kw))
 
 
+def critique_reply(text: str = "APPROVED", **kw) -> AIMessage:
+    """Turns that used tools get one reflection pass before answering."""
+    return AIMessage(content=text, usage_metadata=usage(**kw))
+
+
 def usage(input_tokens=1000, output_tokens=60, cached=0) -> dict[str, Any]:
     return {
         "input_tokens": input_tokens,
@@ -143,6 +148,7 @@ async def test_full_research_turn(recorded, fake_rest_search, monkeypatch):
             usage_metadata=usage(3000, 900, cached=1000),
         ),
         AIMessage(content="Your report is ready. It covers causes and mitigation.", usage_metadata=usage(4200, 120, cached=2800)),
+        critique_reply("APPROVED"),
     ]
 
     events, ctx = await run_with(script, monkeypatch)
@@ -161,16 +167,17 @@ async def test_full_research_turn(recorded, fake_rest_search, monkeypatch):
     # The step timeline the UI renders. The plan is announced before the work.
     step_kinds = [e["kind"] for e in events if e["t"] == "step"]
     assert step_kinds[0] == "plan"
+    assert step_kinds[-1] == "critique"
     assert step_kinds.count("thinking") == 3
     assert "search" in step_kinds and "read" in step_kinds and "pdf" in step_kinds
 
     plan_step = next(e for e in events if e.get("kind") == "plan")
     assert "Search for causes" in plan_step["detail"]
 
-    # One usage row per model call, not per turn — planning included.
-    assert len(recorded["usage"]) == 4
-    assert [u["input_tokens"] for u in recorded["usage"]] == [1000, 1200, 3000, 4200]
-    assert [u["cached_tokens"] for u in recorded["usage"]] == [0, 0, 1000, 2800]
+    # One usage row per model call, not per turn — plan and critique included.
+    assert len(recorded["usage"]) == 5
+    assert [u["input_tokens"] for u in recorded["usage"]] == [1000, 1200, 3000, 4200, 1000]
+    assert [u["cached_tokens"] for u in recorded["usage"]] == [0, 0, 1000, 2800, 0]
 
     # Cost must price cached tokens at the cache-read rate:
     #   (3000-1000)*3/1M + 1000*0.3/1M + 900*15/1M
@@ -250,6 +257,7 @@ async def test_search_falls_back_to_rest_when_mcp_fails(recorded, fake_rest_sear
             usage_metadata=usage(),
         ),
         AIMessage(content="Here is what I found.", usage_metadata=usage()),
+        critique_reply(),
     ]))
     monkeypatch.setattr(main.app.state, "mcp_search", BrokenMcpTool(), raising=False)
 
@@ -280,6 +288,7 @@ async def test_search_uses_mcp_when_available(recorded, fake_rest_search, monkey
             usage_metadata=usage(),
         ),
         AIMessage(content="Answer.", usage_metadata=usage()),
+        critique_reply(),
     ]))
     monkeypatch.setattr(main.app.state, "mcp_search", WorkingMcpTool(), raising=False)
 
@@ -292,6 +301,67 @@ async def test_search_uses_mcp_when_available(recorded, fake_rest_search, monkey
     assert fake_rest_search == []  # REST was never touched
     read_step = next(e for e in events if e.get("kind") == "read")
     assert "via MCP" in read_step["label"]
+
+
+async def test_critique_sends_the_draft_back_for_one_revision(
+    recorded, fake_rest_search, monkeypatch
+):
+    """A review that finds gaps must change the answer the user sees."""
+    script = [
+        plan_reply("1. Look it up"),
+        AIMessage(
+            content="",
+            tool_calls=[{"name": "web_search", "args": {"query": "q"}, "id": "c1"}],
+            usage_metadata=usage(),
+        ),
+        AIMessage(content="Draft answer with a shaky claim.", usage_metadata=usage()),
+        critique_reply("- The claim about costs is not in any source you read."),
+        AIMessage(content="Revised answer, claim removed.", usage_metadata=usage()),
+        critique_reply("APPROVED"),  # must never be consumed — one pass only
+    ]
+    events, _ = await run_with(script, monkeypatch)
+
+    assert next(e for e in events if e["t"] == "message")["text"] == "Revised answer, claim removed."
+
+    labels = [e["label"] for e in events if e.get("kind") in {"critique", "thinking"}]
+    assert "Found gaps to fix" in labels
+    assert "Revising after review" in labels
+
+    # plan + tool call + draft + critique + revision. The second critique is
+    # never reached, so exactly one reflection pass happened.
+    assert len(recorded["usage"]) == 5
+    assert recorded["messages"][0]["content"] == "Revised answer, claim removed."
+
+
+async def test_conversational_turn_is_not_critiqued(recorded, fake_rest_search, monkeypatch):
+    """Reflection costs a model call; a turn that did no research skips it."""
+    script = [
+        plan_reply("NO_PLAN"),
+        AIMessage(content="Paris.", usage_metadata=usage()),
+    ]
+    events, _ = await run_with(script, monkeypatch)
+
+    assert not [e for e in events if e.get("kind") == "critique"]
+    assert len(recorded["usage"]) == 2
+
+
+async def test_step_limit_still_reports_rather_than_returning_the_plan(
+    recorded, fake_rest_search, monkeypatch
+):
+    """The injected plan is not an answer — exhausting the budget must say so."""
+    script = [plan_reply("1. Search forever")] + [
+        AIMessage(
+            content="",
+            tool_calls=[{"name": "web_search", "args": {"query": f"q{i}"}, "id": f"c{i}"}],
+            usage_metadata=usage(),
+        )
+        for i in range(30)
+    ]
+    events, _ = await run_with(script, monkeypatch)
+
+    text = next(e for e in events if e["t"] == "message")["text"]
+    assert "step limit" in text
+    assert "research plan" not in text
 
 
 async def test_done_event_carries_remaining_credits(recorded, fake_rest_search, monkeypatch):

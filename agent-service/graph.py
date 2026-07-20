@@ -1,11 +1,20 @@
 """The research loop, as a LangGraph StateGraph.
 
-    plan ──> agent ──(tool_calls?)──> tools ──> agent ──> END
+              ┌──────────────> tools ──┐
+              │                        v
+    plan ──> agent <───────────────────┘
+              │  ^
+              v  └── (revise) ── critique ──> END
+           critique
+
+Concretely: plan the research, run the search loop, then review the draft once
+before answering. A review that finds gaps sends feedback back to the agent for
+exactly one revision pass.
 
 An explicit graph rather than a prebuilt react agent, for two reasons: usage has
 to be recorded after every individual model call (one user turn with a five-step
 loop must produce five costed usage_events rows), and the loop is not a bare
-react cycle — a planning pass runs first.
+react cycle — planning runs before it and reflection after it.
 """
 
 from __future__ import annotations
@@ -13,6 +22,7 @@ from __future__ import annotations
 from typing import Annotated, Any, Callable, TypedDict
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+from langchain_core.runnables import RunnableConfig
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, StateGraph
 from langgraph.graph.message import add_messages
@@ -34,9 +44,20 @@ PLAN_INSTRUCTION = """Before you answer, decide whether this needs live research
 If it does, reply with a short numbered research plan — at most four steps, one line each, naming what you will search for and why. Nothing else.
 If you can answer it directly without searching, reply with exactly: NO_PLAN"""
 
+CRITIQUE_INSTRUCTION = """Review the draft answer above before it reaches the user.
+
+Check it against the research in this conversation: is any claim unsupported by the sources you actually read, is anything important missing, is anything stated more confidently than the evidence allows?
+
+If the draft is sound, reply with exactly: APPROVED
+Otherwise reply with the specific fixes needed, as a short list. Do not rewrite the answer yourself."""
+
 
 class State(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
+    # Reflection only runs on turns that actually researched something, and only
+    # once — otherwise a stubborn critic could loop the user's credit away.
+    used_tools: bool
+    critique_done: bool
 
 
 def _is_internal(message: BaseMessage) -> bool:
@@ -118,28 +139,84 @@ def build_graph(
 
     async def agent(state: State) -> dict:
         agent_turns["n"] += 1
-        await ctx.step(
-            "thinking", "Thinking" if agent_turns["n"] == 1 else "Reviewing what I found"
-        )
+        last = state["messages"][-1]
+        if _is_internal(last) and isinstance(last, HumanMessage):
+            label = "Revising after review"
+        elif agent_turns["n"] == 1:
+            label = "Thinking"
+        else:
+            label = "Reviewing what I found"
+        await ctx.step("thinking", label)
 
         response = await bound.ainvoke(state["messages"])
         await track(response)
         return {"messages": [response]}
 
-    async def should_continue(state: State) -> str:
+    async def critique(state: State) -> dict:
+        """One reflection pass over the draft, before the user ever sees it."""
+        response = await model.ainvoke(
+            [*state["messages"], HumanMessage(content=CRITIQUE_INSTRUCTION)]
+        )
+        await track(response)
+
+        text = _text_of(response)
+        if not text or "APPROVED" in text.upper():
+            await ctx.step("critique", "Reviewed the draft — no gaps found")
+            return {"critique_done": True}
+
+        await ctx.step("critique", "Found gaps to fix", text)
+        return {
+            "messages": [
+                HumanMessage(
+                    content=(
+                        f"Reviewer feedback on your draft:\n{text}\n\n"
+                        "Revise your answer accordingly. Reply with the corrected answer only."
+                    ),
+                    additional_kwargs=INTERNAL,
+                )
+            ],
+            "critique_done": True,
+        }
+
+    tool_node = ToolNode(tools)
+
+    async def run_tools(state: State, config: RunnableConfig) -> dict:
+        # Wraps ToolNode only to record that this turn did real research, which
+        # is what makes reflection worth paying for. The config has to be passed
+        # through by hand — ToolNode reads the graph's runtime state from it.
+        result = await tool_node.ainvoke(state, config)
+        return {**result, "used_tools": True}
+
+    async def after_agent(state: State) -> str:
         last = state["messages"][-1]
-        if getattr(last, "tool_calls", None) and call_count["n"] < MAX_MODEL_CALLS:
-            return "tools"
+        if getattr(last, "tool_calls", None):
+            return "tools" if call_count["n"] < MAX_MODEL_CALLS else END
+        # Reserve a call for the revision the critique may ask for.
+        if (
+            state.get("used_tools")
+            and not state.get("critique_done")
+            and _text_of(last)
+            and call_count["n"] < MAX_MODEL_CALLS - 1
+        ):
+            return "critique"
         return END
+
+    async def after_critique(state: State) -> str:
+        last = state["messages"][-1]
+        return "agent" if _is_internal(last) and isinstance(last, HumanMessage) else END
 
     graph = StateGraph(State)
     graph.add_node("plan", plan)
     graph.add_node("agent", agent)
-    graph.add_node("tools", ToolNode(tools))
+    graph.add_node("tools", run_tools)
+    graph.add_node("critique", critique)
     graph.set_entry_point("plan")
     graph.add_edge("plan", "agent")
-    graph.add_conditional_edges("agent", should_continue, {"tools": "tools", END: END})
+    graph.add_conditional_edges(
+        "agent", after_agent, {"tools": "tools", "critique": "critique", END: END}
+    )
     graph.add_edge("tools", "agent")
+    graph.add_conditional_edges("critique", after_critique, {"agent": "agent", END: END})
     return graph.compile()
 
 

@@ -122,7 +122,11 @@ async def _run_episode(req: RunRequest, ctx: RunContext, queue: asyncio.Queue) -
 
         history = [{"role": t.role, "content": t.content} for t in req.history]
         state = await graph.ainvoke(
-            {"messages": initial_messages(history, req.message)},
+            {
+                "messages": initial_messages(history, req.message),
+                "used_tools": False,
+                "critique_done": False,
+            },
             config={"recursion_limit": RECURSION_LIMIT},
         )
 
