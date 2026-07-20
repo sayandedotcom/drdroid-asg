@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 from typing import Any, Callable
 
 import httpx
@@ -20,12 +21,13 @@ How to work:
 - Search before answering anything that depends on current information, specific facts, numbers, or recent events. Do not answer those from memory.
 - Run several focused searches rather than one broad one. Follow up on what you find: if a search surfaces a cause, a place, or a name you did not know about, search again to go deeper.
 - Read the results critically. Cross-check claims that matter across more than one source.
-- Cite sources inline as markdown links when you state a specific fact.
+- Every search result carries a number. Cite specific facts inline with that number, like [2], and cite the source you actually read the fact in. Numbers stay valid across all of your searches.
 
 When to produce a PDF:
 - If the user asks for a report, document, write-up, or deliverable, call create_pdf_report once at the end with the complete report in markdown.
 - Do not call it for ordinary conversational answers.
-- The report should be substantial and well structured: an opening summary, ## sections, concrete detail from your research, and a Sources section with links.
+- The report should be substantial and well structured: an opening summary, ## sections, and concrete detail from your research with [n] citations.
+- Do not write a sources list yourself. One is appended automatically from the pages you actually opened.
 
 Style: write clearly and directly. Lead with the answer, then the supporting detail. Use markdown headings and lists where they help the reader. Be specific — name the places, dates, numbers, and organisations you found rather than speaking in generalities."""
 
@@ -42,6 +44,33 @@ class RunContext:
         self.user_id = user_id
         self.chat_id = chat_id
         self.steps: list[dict[str, Any]] = []
+        # url -> {"n": citation number, "title": …}, in first-seen order. Numbers
+        # are global across every search in the turn, so [4] means the same page
+        # in the model's third search as in the report's sources list.
+        self.sources: dict[str, dict[str, Any]] = {}
+
+    def register_source(self, url: str, title: str = "") -> int:
+        """Assigns a stable citation number to a page the agent actually read."""
+        known = self.sources.get(url)
+        if known:
+            if title and not known["title"]:
+                known["title"] = title
+            return known["n"]
+        self.sources[url] = {"n": len(self.sources) + 1, "title": title}
+        return self.sources[url]["n"]
+
+    def sources_markdown(self) -> str:
+        """The Sources section, built from what was read rather than recalled."""
+        if not self.sources:
+            return ""
+        # The URL is the visible text, not just the link target: a PDF gets
+        # printed and forwarded, and a citation you cannot read is not a citation.
+        lines = [
+            f"{entry['n']}. {entry['title']} — [{url}]({url})" if entry["title"]
+            else f"{entry['n']}. [{url}]({url})"
+            for url, entry in sorted(self.sources.items(), key=lambda kv: kv[1]["n"])
+        ]
+        return "## Sources\n\n" + "\n".join(lines) + "\n"
 
     async def step(self, kind: str, label: str, detail: str | None = None) -> None:
         record = {"kind": kind, "label": label}
@@ -57,18 +86,43 @@ class RunContext:
 # --------------------------------------------------------------------- search
 
 
-def _format_results(answer: str | None, results: list[dict[str, Any]], query: str) -> str:
+_URL_RE = re.compile(r"https?://[^\s\)\]\}<>\"']+")
+
+
+def _format_results(
+    answer: str | None, results: list[dict[str, Any]], query: str, ctx: RunContext
+) -> str:
+    """Renders results with their *global* citation numbers."""
     if not results:
         return f'No results for "{query}".'
-    parts = [
-        f"[{i + 1}] {r.get('title', '')}\nURL: {r.get('url', '')}\n{(r.get('content') or '')[:1500]}"
-        for i, r in enumerate(results)
-    ]
+    parts = []
+    for r in results:
+        url = r.get("url") or ""
+        n = ctx.register_source(url, r.get("title") or "")
+        parts.append(f"[{n}] {r.get('title', '')}\nURL: {url}\n{(r.get('content') or '')[:1500]}")
     summary = f"Quick answer: {answer}\n\n" if answer else ""
     return summary + "\n\n".join(parts)
 
 
-async def search_via_rest(query: str, depth: str = "advanced") -> tuple[str, int]:
+def _number_mcp_results(text: str, ctx: RunContext) -> tuple[str, int]:
+    """MCP hands back opaque prose, so pull the URLs out and number them.
+
+    The server's own numbering (if any) is local to one search and would collide
+    across searches, so the appended block is stated as authoritative.
+    """
+    urls = list(dict.fromkeys(_URL_RE.findall(text)))
+    if not urls:
+        return text, 0
+    listing = "\n".join(f"[{ctx.register_source(url)}] {url}" for url in urls)
+    return (
+        f"{text}\n\nCite these sources using exactly these numbers:\n{listing}",
+        len(urls),
+    )
+
+
+async def search_via_rest(
+    query: str, depth: str = "advanced"
+) -> tuple[list[dict[str, Any]], str | None]:
     """Direct Tavily REST call. Mirrors webSearch() in the old lib/tools.ts."""
     api_key = os.environ.get("TAVILY_API_KEY")
     if not api_key:
@@ -89,8 +143,7 @@ async def search_via_rest(query: str, depth: str = "advanced") -> tuple[str, int
             raise RuntimeError(f"Search failed ({response.status_code}): {response.text[:200]}")
         data = response.json()
 
-    results = data.get("results") or []
-    return _format_results(data.get("answer"), results, query), len(results)
+    return data.get("results") or [], data.get("answer")
 
 
 class SearchArgs(BaseModel):
@@ -118,14 +171,17 @@ def build_search_tool(ctx: RunContext, mcp_tool: Any | None) -> StructuredTool:
         if mcp_tool is not None:
             try:
                 raw = await mcp_tool.ainvoke({"query": query})
-                text = raw if isinstance(raw, str) else str(raw)
-                count = text.count("http")
+                text, count = _number_mcp_results(
+                    raw if isinstance(raw, str) else str(raw), ctx
+                )
             except Exception:
                 text = None  # fall through to REST
 
         if text is None:
             transport = "REST"
-            text, count = await search_via_rest(query, depth)
+            results, answer = await search_via_rest(query, depth)
+            text = _format_results(answer, results, query, ctx)
+            count = len(results)
 
         await ctx.step("read", f"Read {count} source{'' if count == 1 else 's'} via {transport}", query)
         return text
@@ -165,7 +221,11 @@ def build_report_tool(ctx: RunContext, upload: Callable[..., str], save: Callabl
 
     async def run(title: str, markdown: str) -> str:
         await ctx.step("pdf", "Writing PDF report", title)
-        pdf_bytes = await asyncio.to_thread(render_report, title, markdown)
+        # Built from the registry rather than from the model's recollection, so
+        # the list can only contain pages that were genuinely fetched.
+        sources = ctx.sources_markdown()
+        body = f"{markdown.rstrip()}\n\n{sources}" if sources else markdown
+        pdf_bytes = await asyncio.to_thread(render_report, title, body)
         url = await asyncio.to_thread(
             upload, user_id=ctx.user_id, chat_id=ctx.chat_id, title=title, pdf=pdf_bytes
         )

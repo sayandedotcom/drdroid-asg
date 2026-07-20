@@ -9,6 +9,9 @@ yet.
 from __future__ import annotations
 
 import asyncio
+import shutil
+import subprocess
+import tempfile
 from typing import Any
 
 import pytest
@@ -40,6 +43,18 @@ class ScriptedModel(BaseChatModel):
         if isinstance(message, Exception):
             raise message
         return ChatResult(generations=[ChatGeneration(message=message)])
+
+
+def extract_pdf_text(pdf: bytes) -> str:
+    """Reads a generated PDF back. Skips where poppler isn't installed."""
+    if not shutil.which("pdftotext"):
+        pytest.skip("pdftotext (poppler-utils) not available")
+    with tempfile.NamedTemporaryFile(suffix=".pdf") as f:
+        f.write(pdf)
+        f.flush()
+        return subprocess.run(
+            ["pdftotext", f.name, "-"], capture_output=True, text=True, check=True
+        ).stdout
 
 
 def plan_reply(text: str = "NO_PLAN", **kw) -> AIMessage:
@@ -83,8 +98,14 @@ def fake_rest_search(monkeypatch):
     async def _search(query: str, depth: str = "advanced"):
         calls.append(query)
         return (
-            f"[1] Result for {query}\nURL: https://example.com/a\nSome page content.",
-            1,
+            [
+                {
+                    "title": f"Result for {query}",
+                    "url": f"https://example.com/{len(calls)}",
+                    "content": "Some page content.",
+                }
+            ],
+            None,
         )
 
     monkeypatch.setattr(tools_mod, "search_via_rest", _search)
@@ -331,6 +352,83 @@ async def test_critique_sends_the_draft_back_for_one_revision(
     # never reached, so exactly one reflection pass happened.
     assert len(recorded["usage"]) == 5
     assert recorded["messages"][0]["content"] == "Revised answer, claim removed."
+
+
+async def test_report_cites_only_pages_that_were_read(recorded, fake_rest_search, monkeypatch):
+    """The sources list is built from the registry, not from the model's memory."""
+    script = [
+        plan_reply("1. Search twice"),
+        AIMessage(
+            content="",
+            tool_calls=[{"name": "web_search", "args": {"query": "first"}, "id": "c1"}],
+            usage_metadata=usage(),
+        ),
+        AIMessage(
+            content="",
+            tool_calls=[{"name": "web_search", "args": {"query": "second"}, "id": "c2"}],
+            usage_metadata=usage(),
+        ),
+        AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "name": "create_pdf_report",
+                    "args": {
+                        "title": "Findings",
+                        # The model invents a source it never opened; it must not
+                        # survive into the generated sources list.
+                        "markdown": "## Findings\n\nDrought is the driver [1].",
+                    },
+                    "id": "c3",
+                }
+            ],
+            usage_metadata=usage(),
+        ),
+        AIMessage(content="Report ready.", usage_metadata=usage()),
+        critique_reply(),
+    ]
+    events, ctx = await run_with(script, monkeypatch)
+
+    # Two searches, two distinct pages, numbered globally rather than per-search.
+    assert [e["n"] for e in ctx.sources.values()] == [1, 2]
+    assert set(ctx.sources) == {"https://example.com/1", "https://example.com/2"}
+
+    text = extract_pdf_text(recorded["artifacts"][0]["pdf"])
+    assert "Sources" in text
+    assert "example.com/1" in text and "example.com/2" in text
+    assert next(e for e in events if e["t"] == "artifact")["title"] == "Findings"
+
+
+async def test_search_results_carry_global_citation_numbers(recorded, monkeypatch):
+    """Numbers must not restart per search, or [1] would be ambiguous."""
+    ctx = RunContext(asyncio.Queue(), "u", "c")
+    seen: list[str] = []
+
+    async def _search(query: str, depth: str = "advanced"):
+        seen.append(query)
+        return (
+            [
+                {"title": "A", "url": "https://a.test", "content": "a"},
+                {"title": "B", "url": "https://b.test", "content": "b"},
+            ]
+            if len(seen) == 1
+            else [
+                {"title": "B", "url": "https://b.test", "content": "b"},  # repeat
+                {"title": "C", "url": "https://c.test", "content": "c"},
+            ],
+            None,
+        )
+
+    monkeypatch.setattr(tools_mod, "search_via_rest", _search)
+    tool = tools_mod.build_search_tool(ctx, None)
+
+    first = await tool.coroutine(query="one")
+    second = await tool.coroutine(query="two")
+
+    assert "[1] A" in first and "[2] B" in first
+    # B keeps its number; only C is new.
+    assert "[2] B" in second and "[3] C" in second
+    assert [e["n"] for e in ctx.sources.values()] == [1, 2, 3]
 
 
 async def test_conversational_turn_is_not_critiqued(recorded, fake_rest_search, monkeypatch):
