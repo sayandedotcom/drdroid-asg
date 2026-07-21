@@ -15,8 +15,10 @@ import asyncio
 import json
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
+from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -25,6 +27,14 @@ import db
 from graph import RECURSION_LIMIT, build_graph, build_model, final_text, initial_messages
 from pricing import cost_of
 from tools import RunContext, build_report_tool, build_search_tool
+
+# Local dev convenience: the Next.js side auto-loads .env.local, so it is easy to
+# assume this service does the same with its own .env — it did not, and the
+# result was a server that booted fine and then 500'd on the first request.
+# Loaded by absolute path so it works whatever the working directory is, and
+# without override so real environment variables (Vercel, CI, an inline
+# VAR=... prefix) always win over the file.
+load_dotenv(Path(__file__).with_name(".env"), override=False)
 
 DONE = object()  # queue sentinel
 
