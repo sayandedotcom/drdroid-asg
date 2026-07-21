@@ -67,7 +67,7 @@ export default function SettingsForm({
         <legend className="text-xs font-medium tracking-wide text-ink-400 uppercase">
           Provider
         </legend>
-        <div className="mt-2.5 grid gap-2 sm:grid-cols-3">
+        <div className="mt-2.5 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
           {(Object.keys(PROVIDERS) as Provider[]).map((p) => (
             <button
               key={p}

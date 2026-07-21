@@ -4,7 +4,7 @@
 // Every provider we support reports cached tokens as a SUBSET of the prompt
 // token count, so billed input = prompt - cached (see costOf below).
 
-export type Provider = "anthropic" | "openai" | "moonshot";
+export type Provider = "anthropic" | "openai" | "moonshot" | "gemini";
 
 export interface ModelSpec {
   id: string;
@@ -32,6 +32,12 @@ export const PROVIDERS: Record<Provider, { label: string; baseUrl: string; keyHi
     baseUrl: "https://api.moonshot.ai/v1",
     keyHint: "sk-...",
   },
+  gemini: {
+    label: "Google (Gemini)",
+    // Gemini's OpenAI-compatibility layer, not the native generateContent API.
+    baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai/",
+    keyHint: "AIza...",
+  },
 };
 
 export const MODELS: ModelSpec[] = [
@@ -49,6 +55,18 @@ export const MODELS: ModelSpec[] = [
   // Moonshot
   { id: "kimi-k2-0905-preview", label: "Kimi K2 (0905)", provider: "moonshot", in: 0.6, out: 2.5, cachedIn: 0.15, context: "256K" },
   { id: "kimi-k2-turbo-preview", label: "Kimi K2 Turbo", provider: "moonshot", in: 2.4, out: 10, cachedIn: 0.6, context: "256K" },
+
+  // Google — rates from ai.google.dev/gemini-api/docs/pricing (paid tier).
+  //
+  // Gemini 3.1 Pro is TIERED: above a 200K-token prompt the rates double to
+  // $4 in / $18 out / $0.40 cached. ModelSpec carries one flat rate, so these
+  // are the <=200K figures — the common case for this app, where a turn is a
+  // chat history plus research snippets. A user who pastes a genuinely huge
+  // prompt is under-billed against Google's actual charge; adding tier support
+  // to ModelSpec is the fix if that ever stops being an edge case.
+  { id: "gemini-3.5-flash", label: "Gemini 3.5 Flash", provider: "gemini", in: 1.5, out: 9, cachedIn: 0.15, context: "1M" },
+  { id: "gemini-3.1-pro-preview", label: "Gemini 3.1 Pro", provider: "gemini", in: 2, out: 12, cachedIn: 0.2, context: "1M" },
+  { id: "gemini-2.5-flash-lite", label: "Gemini 2.5 Flash-Lite", provider: "gemini", in: 0.1, out: 0.4, cachedIn: 0.01, context: "1M" },
 ];
 
 export function modelSpec(id: string): ModelSpec | undefined {

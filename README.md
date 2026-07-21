@@ -84,7 +84,7 @@ individually.
   Either path grants 5 credits.
 - **Bring your own key** — no model key ships with the app. Users add an OpenAI-compatible key
   and base URL; the key is verified with a live test call, then AES-256-GCM encrypted at rest.
-  Anthropic, OpenAI and Moonshot presets are built in; any compatible endpoint works.
+  Anthropic, OpenAI, Google (Gemini) and Moonshot presets are built in; any compatible endpoint works.
 - **Agentic loop** — plan, research, then self-review, up to 12 model calls per turn. The UI
   streams each step as it happens (planning, searching, reading N sources, writing the PDF,
   reviewing the draft) and then streams the answer itself token by token.
