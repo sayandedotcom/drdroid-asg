@@ -32,10 +32,10 @@ MODELS = {
         # Moonshot
         ModelSpec("kimi-k2-0905-preview", "Kimi K2 (0905)", "moonshot", 0.6, 2.5, 0.15),
         ModelSpec("kimi-k2-turbo-preview", "Kimi K2 Turbo", "moonshot", 2.4, 10, 0.6),
-        # Google — Gemini 3.1 Pro is tiered above a 200K prompt; these are the
-        # <=200K rates. See the note in lib/models.ts.
-        ModelSpec("gemini-3.5-flash", "Gemini 3.5 Flash", "gemini", 1.5, 9, 0.15),
-        ModelSpec("gemini-3.1-pro-preview", "Gemini 3.1 Pro", "gemini", 2, 12, 0.2),
+        # Google — the 2.5 line, not 3.x (thought_signature; see lib/models.ts).
+        # Gemini 2.5 Pro is tiered above a 200K prompt; these are the <=200K rates.
+        ModelSpec("gemini-2.5-pro", "Gemini 2.5 Pro", "gemini", 1.25, 10, 0.125),
+        ModelSpec("gemini-2.5-flash", "Gemini 2.5 Flash", "gemini", 0.3, 2.5, 0.03),
         ModelSpec("gemini-2.5-flash-lite", "Gemini 2.5 Flash-Lite", "gemini", 0.1, 0.4, 0.01),
     ]
 }

@@ -58,14 +58,22 @@ export const MODELS: ModelSpec[] = [
 
   // Google — rates from ai.google.dev/gemini-api/docs/pricing (paid tier).
   //
-  // Gemini 3.1 Pro is TIERED: above a 200K-token prompt the rates double to
-  // $4 in / $18 out / $0.40 cached. ModelSpec carries one flat rate, so these
-  // are the <=200K figures — the common case for this app, where a turn is a
+  // Deliberately the 2.5 line, not 3.x. Gemini 3 models attach a
+  // thought_signature to every function call and reject the next turn with a
+  // 400 if it is not echoed back. Over the OpenAI-compatible endpoint that
+  // signature rides in tool_calls[].extra_content, which langchain-openai drops
+  // on the return trip -- so 3.x fails on the second agent step, every time,
+  // with no parameter that avoids it. Moving to 3.x means moving this provider
+  // off ChatOpenAI onto a Google-native client.
+  //
+  // Gemini 2.5 Pro is TIERED: above a 200K-token prompt the rates double to
+  // $2.50 in / $15 out / $0.25 cached. ModelSpec carries one flat rate, so these
+  // are the <=200K figures -- the common case for this app, where a turn is a
   // chat history plus research snippets. A user who pastes a genuinely huge
   // prompt is under-billed against Google's actual charge; adding tier support
   // to ModelSpec is the fix if that ever stops being an edge case.
-  { id: "gemini-3.5-flash", label: "Gemini 3.5 Flash", provider: "gemini", in: 1.5, out: 9, cachedIn: 0.15, context: "1M" },
-  { id: "gemini-3.1-pro-preview", label: "Gemini 3.1 Pro", provider: "gemini", in: 2, out: 12, cachedIn: 0.2, context: "1M" },
+  { id: "gemini-2.5-pro", label: "Gemini 2.5 Pro", provider: "gemini", in: 1.25, out: 10, cachedIn: 0.125, context: "1M" },
+  { id: "gemini-2.5-flash", label: "Gemini 2.5 Flash", provider: "gemini", in: 0.3, out: 2.5, cachedIn: 0.03, context: "1M" },
   { id: "gemini-2.5-flash-lite", label: "Gemini 2.5 Flash-Lite", provider: "gemini", in: 0.1, out: 0.4, cachedIn: 0.01, context: "1M" },
 ];
 

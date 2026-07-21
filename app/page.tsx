@@ -90,7 +90,7 @@ export default function Landing() {
             the model you picked. The Usage page shows it per chat and in total.
           </p>
           <div className="mt-6 flex flex-wrap gap-2">
-            {["Claude Opus 4.8", "Claude Sonnet 5", "GPT-5", "Gemini 3.5 Flash", "Kimi K2"].map((m) => (
+            {["Claude Opus 4.8", "Claude Sonnet 5", "GPT-5", "Gemini 2.5 Pro", "Kimi K2"].map((m) => (
               <span
                 key={m}
                 className="rounded-md border border-ink-700 bg-ink-850 px-2.5 py-1 font-[family-name:var(--font-mono)] text-xs text-ink-400"
