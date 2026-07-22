@@ -16,7 +16,7 @@ from typing import Any
 
 import pytest
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, AIMessageChunk
 from langchain_core.outputs import ChatGeneration, ChatResult
 
 import db
@@ -534,6 +534,49 @@ async def test_streaming_failure_falls_back_to_a_plain_call(
     assert not [e for e in events if e["t"] == "delta"]
     assert next(e for e in events if e["t"] == "message")["text"] == "Answered without streaming."
     assert recorded["usage"][-1]["input_tokens"] == 1000
+
+
+async def test_usage_is_not_multiplied_when_a_provider_repeats_it_per_chunk(
+    recorded, fake_rest_search, monkeypatch
+):
+    """A running total on every chunk must be recorded once, not summed.
+
+    Gemini's OpenAI-compatible endpoint reports cumulative usage on each chunk.
+    Adding chunks sums usage_metadata, so the answer-writing call -- the only
+    one that streams many chunks -- was billed once per chunk. Every tool-call
+    turn stayed correct, which is what made it hard to see.
+    """
+
+    class CumulativeUsageModel(ScriptedModel):
+        def bind_tools(self, tools, **kwargs):
+            return self
+
+        async def astream(self, *a, **kw):
+            for i, text in enumerate(["Wild", "fire ", "report."], start=1):
+                yield AIMessageChunk(
+                    content=text,
+                    usage_metadata=usage(input_tokens=1000, output_tokens=10 * i),
+                )
+
+    monkeypatch.setattr(
+        main,
+        "build_model",
+        lambda **kw: CumulativeUsageModel(script=[plan_reply("NO_PLAN")]),
+    )
+    monkeypatch.setattr(main.app.state, "mcp_search", None, raising=False)
+
+    queue: asyncio.Queue = asyncio.Queue()
+    ctx = RunContext(queue, "user-1", "chat-1")
+    task = asyncio.create_task(_run_episode(request_for(), ctx, queue))
+    events = await drain(queue)
+    await task
+
+    # The text still reconstructs from every chunk.
+    assert next(e for e in events if e["t"] == "message")["text"] == "Wildfire report."
+
+    answer_call = recorded["usage"][-1]
+    assert answer_call["input_tokens"] == 1000, "summed the same prompt once per chunk"
+    assert answer_call["output_tokens"] == 30, "expected the final running total, not the sum"
 
 
 async def test_done_event_carries_remaining_credits(recorded, fake_rest_search, monkeypatch):

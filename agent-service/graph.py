@@ -116,7 +116,20 @@ async def _stream_answer(
         try:
             response: Any = None
             first = True
+            last_usage: dict[str, Any] | None = None
             async for chunk in bound.astream(messages):
+                # Adding chunks SUMS their usage_metadata. That is right for a
+                # provider that reports usage once, on the final chunk (OpenAI),
+                # and badly wrong for one that repeats a running total on every
+                # chunk (Gemini): the answer-writing call is the only one that
+                # streams many chunks, so it alone gets billed roughly N times
+                # over -- inflating a turn's cost by an order of magnitude while
+                # every tool-call turn looks correct.
+                #
+                # Keep the last figure the provider reported rather than the
+                # sum. Under both conventions that is the true final total.
+                if getattr(chunk, "usage_metadata", None):
+                    last_usage = chunk.usage_metadata
                 response = chunk if response is None else response + chunk
                 text = chunk.content if isinstance(chunk.content, str) else ""
                 if text:
@@ -126,6 +139,8 @@ async def _stream_answer(
                         first = False
                     await ctx.emit(event)
             if response is not None:
+                if last_usage is not None:
+                    response.usage_metadata = last_usage
                 return response
         except Exception as exc:  # noqa: BLE001
             print(f"[stream] disabled after failure, falling back to a plain call: {exc}")

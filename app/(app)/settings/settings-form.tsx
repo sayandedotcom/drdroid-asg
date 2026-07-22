@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { PROVIDERS, modelsFor, type Provider } from "@/lib/models";
+import { PROVIDERS, modelSpec, modelsFor, type Provider } from "@/lib/models";
 
 export default function SettingsForm({
   existing,
@@ -10,11 +10,24 @@ export default function SettingsForm({
   existing: { provider: string; baseUrl: string; last4: string; model: string } | null;
 }) {
   const router = useRouter();
-  const [provider, setProvider] = useState<Provider>(
-    (existing?.provider as Provider) || "anthropic"
-  );
-  const [baseUrl, setBaseUrl] = useState(existing?.baseUrl || PROVIDERS.anthropic.baseUrl);
-  const [model, setModel] = useState(existing?.model || modelsFor("anthropic")[0].id);
+
+  // The saved row is free-form text the registry may no longer recognise: a
+  // model can be retired between sessions. Trusting it silently desynced the
+  // form from its own <select> -- the dropdown fell back to showing its first
+  // option while state still held the dead id, so an untouched form POSTed a
+  // model the server rejects with "Pick a supported model." Validate here so a
+  // retired id degrades to this provider's first live model instead.
+  const savedProvider = existing?.provider;
+  const initialProvider: Provider =
+    savedProvider && savedProvider in PROVIDERS ? (savedProvider as Provider) : "anthropic";
+  const initialModel =
+    existing?.model && modelSpec(existing.model)
+      ? existing.model
+      : modelsFor(initialProvider)[0].id;
+
+  const [provider, setProvider] = useState<Provider>(initialProvider);
+  const [baseUrl, setBaseUrl] = useState(existing?.baseUrl || PROVIDERS[initialProvider].baseUrl);
+  const [model, setModel] = useState(initialModel);
   const [apiKey, setApiKey] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
