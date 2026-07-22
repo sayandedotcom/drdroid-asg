@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { modelSpec } from "@/lib/models";
+import ChatCost, { type ChatUsage } from "./chat-cost";
 
 export interface Step {
   kind: string;
@@ -85,34 +86,73 @@ function StepIcon({ kind }: { kind: string }) {
   );
 }
 
+// How much of a step's detail fits on one line before it is worth hiding the
+// rest behind a click. Search queries sit well under this; the research plan and
+// the critique's list of gaps run well over it.
+const DETAIL_PREVIEW = 110;
+
+function StepRow({ step, active }: { step: Step; active: boolean }) {
+  const [open, setOpen] = useState(false);
+
+  // The plan and the critique are the agent's own reasoning, and they were the
+  // one thing the user could not read: the preview cut them off mid-sentence.
+  // Short details still render inline exactly as before, so a search query does
+  // not grow a chevron that reveals nothing.
+  const detail = step.detail;
+  const expandable = !!detail && detail.length > DETAIL_PREVIEW;
+
+  const body = (
+    <>
+      <span className="mt-0.5">
+        <StepIcon kind={step.kind} />
+      </span>
+      <span className="min-w-0 text-left">
+        <span className="font-medium">{step.label}</span>
+        {detail && !open && (
+          <span className="ml-1.5 break-words text-ink-600">
+            {expandable ? `${detail.slice(0, DETAIL_PREVIEW)}…` : detail}
+          </span>
+        )}
+        {detail && open && (
+          // The model writes these as numbered or bulleted lines, so the
+          // newlines carry the structure and have to survive.
+          <span className="mt-1 block break-words whitespace-pre-wrap text-ink-600">{detail}</span>
+        )}
+      </span>
+    </>
+  );
+
+  const tone =
+    step.kind === "error" ? "text-red-400" : active ? "text-ink-200" : "text-ink-500";
+
+  return (
+    <li className={`text-xs ${tone} ${active ? "mm-pulse" : ""}`}>
+      {expandable ? (
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          aria-expanded={open}
+          className="flex w-full items-start gap-2 text-left hover:text-ink-300"
+        >
+          {body}
+          <span aria-hidden className={`mt-0.5 ml-auto shrink-0 transition-transform ${open ? "rotate-90" : ""}`}>
+            ›
+          </span>
+        </button>
+      ) : (
+        <div className="flex items-start gap-2">{body}</div>
+      )}
+    </li>
+  );
+}
+
 function StepList({ steps, live }: { steps: Step[]; live: boolean }) {
   if (!steps.length) return null;
   return (
     <ol className="mb-4 space-y-1.5 border-l border-ink-800 pl-4">
-      {steps.map((s, i) => {
-        const isLast = i === steps.length - 1;
-        const active = live && isLast;
-        return (
-          <li
-            key={i}
-            className={`flex items-start gap-2 text-xs ${
-              s.kind === "error" ? "text-red-400" : active ? "text-ink-200" : "text-ink-500"
-            } ${active ? "mm-pulse" : ""}`}
-          >
-            <span className="mt-0.5">
-              <StepIcon kind={s.kind} />
-            </span>
-            <span className="min-w-0">
-              <span className="font-medium">{s.label}</span>
-              {s.detail && (
-                <span className="ml-1.5 break-words text-ink-600">
-                  {s.detail.length > 110 ? `${s.detail.slice(0, 110)}…` : s.detail}
-                </span>
-              )}
-            </span>
-          </li>
-        );
-      })}
+      {steps.map((s, i) => (
+        <StepRow key={i} step={s} active={live && i === steps.length - 1} />
+      ))}
     </ol>
   );
 }
@@ -148,6 +188,7 @@ export default function ChatView({
   initialMessages,
   artifacts: initialArtifacts,
   credits: initialCredits,
+  usage,
   autoSend,
 }: {
   chatId: string;
@@ -155,6 +196,7 @@ export default function ChatView({
   initialMessages: StoredMessage[];
   artifacts: Artifact[];
   credits: number;
+  usage: ChatUsage;
   autoSend: string | null;
 }) {
   const router = useRouter();
@@ -173,31 +215,48 @@ export default function ChatView({
   const [liveSteps, setLiveSteps] = useState<Step[]>([]);
   const [draft, setDraft] = useState("");
   const [error, setError] = useState<string | null>(null);
+  // The prompt of a turn that failed, kept so Retry can resend it. The message
+  // itself stays on screen and in the database; only the reply is missing.
+  const [failedPrompt, setFailedPrompt] = useState<string | null>(null);
 
   const bottomRef = useRef<HTMLDivElement>(null);
   const startedAutoSend = useRef(false);
+  const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [turns, liveSteps, draft, running]);
 
   const send = useCallback(
-    async (text: string) => {
+    async (text: string, { retry = false }: { retry?: boolean } = {}) => {
       const prompt = text.trim();
       if (!prompt || running) return;
 
       setRunning(true);
       setError(null);
+      setFailedPrompt(null);
       setLiveSteps([]);
       setDraft("");
       setInput("");
-      setTurns((t) => [...t, { kind: "user", id: `tmp-${Date.now()}`, text: prompt }]);
+      // A retry's message bubble is already on screen from the turn that failed.
+      if (!retry) {
+        setTurns((t) => [...t, { kind: "user", id: `tmp-${Date.now()}`, text: prompt }]);
+      }
+
+      const controller = new AbortController();
+      abortRef.current = controller;
+
+      // Declared outside the try so the abort path can keep whatever the agent
+      // had already produced before the user stopped it.
+      const steps: Step[] = [];
+      let streamed = "";
 
       try {
         const res = await fetch("/api/chat", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ chatId, message: prompt }),
+          body: JSON.stringify({ chatId, message: prompt, retry }),
+          signal: controller.signal,
         });
 
         if (!res.ok || !res.body) {
@@ -208,9 +267,7 @@ export default function ChatView({
         const reader = res.body.getReader();
         const decoder = new TextDecoder();
         let buffer = "";
-        const steps: Step[] = [];
         let finalText = "";
-        let streamed = "";
 
         while (true) {
           const { done, value } = await reader.read();
@@ -288,10 +345,44 @@ export default function ChatView({
         setDraft("");
         router.refresh();
       } catch (err) {
-        setError(err instanceof Error ? err.message : String(err));
         setLiveSteps([]);
         setDraft("");
+
+        // Stopping is a deliberate act, not a failure: keep what the agent had
+        // written rather than discarding it, and say nothing in red.
+        // Matched on name rather than type: aborting mid-read rejects with a
+        // DOMException in the browser but a plain Error elsewhere.
+        if (err instanceof Error && err.name === "AbortError") {
+          const partial = streamed.trim();
+          if (partial) {
+            const stopped: Step[] = [
+              ...steps,
+              {
+                kind: "error",
+                label: "Stopped",
+                detail: "You stopped this answer — it may be incomplete.",
+              },
+            ];
+            setTurns((t) => [
+              ...t,
+              { kind: "assistant", id: `a-${Date.now()}`, text: partial, steps: stopped },
+            ]);
+            // The agent was cancelled before it could save this itself, and the
+            // next turn reads its context back out of the database.
+            await fetch("/api/chat/stop", {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ chatId, content: partial, steps: stopped }),
+            }).catch(() => {});
+          }
+          router.refresh();
+          return;
+        }
+
+        setError(err instanceof Error ? err.message : String(err));
+        setFailedPrompt(prompt);
       } finally {
+        abortRef.current = null;
         setRunning(false);
       }
     },
@@ -315,9 +406,15 @@ export default function ChatView({
         <span className="font-[family-name:var(--font-mono)] text-xs text-ink-500">
           {spec?.label ?? model}
         </span>
-        <span className="text-xs text-ink-500">
-          {credits} credit{credits === 1 ? "" : "s"} left
-        </span>
+        <div className="flex items-center gap-3">
+          {/* Read straight from props, never copied into state: router.refresh()
+              after each turn re-renders the server component and this updates
+              with it. */}
+          <ChatCost usage={usage} />
+          <span className="text-xs text-ink-500">
+            {credits} credit{credits === 1 ? "" : "s"} left
+          </span>
+        </div>
       </header>
 
       <div className="min-h-0 flex-1 overflow-y-auto">
@@ -363,7 +460,21 @@ export default function ChatView({
 
           {error && (
             <div className="mb-8 rounded-lg border border-red-900/50 bg-red-950/30 px-4 py-3 text-sm leading-relaxed text-red-300">
-              {error}
+              <p>{error}</p>
+              {failedPrompt && (
+                <button
+                  type="button"
+                  onClick={() => send(failedPrompt, { retry: true })}
+                  disabled={running || credits <= 0}
+                  className="mt-2.5 inline-flex items-center gap-1.5 rounded-lg border border-red-800/70 px-2.5 py-1 text-xs font-medium text-red-200 transition-colors hover:border-red-600 hover:bg-red-900/40 disabled:opacity-40"
+                >
+                  <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="1.6">
+                    <path d="M13 8a5 5 0 1 1-1.5-3.5" strokeLinecap="round" />
+                    <path d="M13 2.5V5h-2.5" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                  Retry
+                </button>
+              )}
             </div>
           )}
 
@@ -396,16 +507,32 @@ export default function ChatView({
               }
               className="max-h-40 min-h-[2.25rem] flex-1 resize-none bg-transparent py-1.5 text-sm outline-none placeholder:text-ink-600 disabled:opacity-60"
             />
-            <button
-              type="submit"
-              disabled={running || !input.trim() || credits <= 0}
-              className="mb-0.5 shrink-0 rounded-lg bg-ink-100 px-3.5 py-1.5 text-sm font-medium text-ink-950 transition-colors hover:bg-white disabled:opacity-40"
-            >
-              {running ? "…" : "Send"}
-            </button>
+            {running ? (
+              // Deliberately not `type="submit"`, and never disabled by the
+              // empty-input rule: mid-run there is nothing typed to gate on.
+              <button
+                type="button"
+                onClick={() => abortRef.current?.abort()}
+                className="mb-0.5 flex shrink-0 items-center gap-1.5 rounded-lg border border-ink-700 px-3.5 py-1.5 text-sm font-medium text-ink-200 transition-colors hover:border-ink-500 hover:text-ink-100"
+              >
+                <svg viewBox="0 0 16 16" className="h-3 w-3" fill="currentColor">
+                  <rect x="3" y="3" width="10" height="10" rx="1.5" />
+                </svg>
+                Stop
+              </button>
+            ) : (
+              <button
+                type="submit"
+                disabled={!input.trim() || credits <= 0}
+                className="mb-0.5 shrink-0 rounded-lg bg-ink-100 px-3.5 py-1.5 text-sm font-medium text-ink-950 transition-colors hover:bg-white disabled:opacity-40"
+              >
+                Send
+              </button>
+            )}
           </div>
           <p className="mt-2 text-xs text-ink-600">
-            Holds context across the whole chat. 1 credit per message.
+            Holds context across the whole chat. 1 credit per message — stopping
+            early still costs it, and keeps what was written.
           </p>
         </form>
       </div>

@@ -17,7 +17,11 @@ export async function POST(req: Request) {
   const user = await currentUser();
   if (!user) return NextResponse.json({ error: "Not signed in." }, { status: 401 });
 
-  const { chatId, message } = (await req.json()) as { chatId?: string; message?: string };
+  const { chatId, message, retry } = (await req.json()) as {
+    chatId?: string;
+    message?: string;
+    retry?: boolean;
+  };
   if (!chatId || !message?.trim()) {
     return NextResponse.json({ error: "chatId and message are required." }, { status: 400 });
   }
@@ -52,6 +56,25 @@ export async function POST(req: Request) {
       { error: "Stored key could not be read. Re-save it in Settings." },
       { status: 500 }
     );
+  }
+
+  // A turn that failed still inserted its user message below, and the credit was
+  // refunded but the row was left behind. Retrying the same text would otherwise
+  // read that orphan into the history *and* insert it again, so the model would
+  // see the question twice. Drop it first and the retry becomes an ordinary send.
+  if (retry) {
+    const { data: last } = await sb
+      .from("messages")
+      .select("id, role")
+      .eq("chat_id", chatId)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    // Only ever an unanswered question: if an assistant reply is newest then
+    // nothing was orphaned and there is nothing to clean up.
+    if (last?.role === "user") {
+      await admin.from("messages").delete().eq("id", last.id);
+    }
   }
 
   // Prior turns, so the agent holds context within this chat. Read before the

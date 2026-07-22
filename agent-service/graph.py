@@ -9,7 +9,8 @@
 
 Concretely: plan the research, run the search loop, then review the draft once
 before answering. A review that finds gaps sends feedback back to the agent for
-exactly one revision pass.
+exactly one revision pass — which re-enters the loop above, so a gap that needs
+facts nobody looked up yet is researched rather than written from memory.
 
 An explicit graph rather than a prebuilt react agent, for two reasons: usage has
 to be recorded after every individual model call (one user turn with a five-step
@@ -181,7 +182,7 @@ def build_graph(
         if not text or "NO_PLAN" in text.upper():
             return {}
 
-        await ctx.step("plan", "Planned the research", text)
+        await ctx.step("plan", "Planning the research", text)
         return {
             "messages": [
                 AIMessage(content=f"My research plan:\n{text}", additional_kwargs=INTERNAL)
@@ -191,12 +192,21 @@ def build_graph(
     async def agent(state: State) -> dict:
         agent_turns["n"] += 1
         last = state["messages"][-1]
+        # These describe what the model is about to do, in the words someone who
+        # did not build this would use. The middle case used to read "Reviewing
+        # what I found", which named the wrong activity: reviewing is the
+        # separate critique pass below, while this step is the model choosing
+        # its next search. It is also the step that repeats after every search,
+        # so the wrong word was the one the user saw most often.
         if _is_internal(last) and isinstance(last, HumanMessage):
-            label = "Revising after review"
+            # Not "Rewriting the answer": a review that found a factual gap sends
+            # the model back to search for it, so this turn may be a tool call
+            # rather than prose. This label is true either way.
+            label = "Addressing the review"
         elif agent_turns["n"] == 1:
-            label = "Thinking"
+            label = "Deciding what to look up"
         else:
-            label = "Reviewing what I found"
+            label = "Deciding what to search next"
         await ctx.step("thinking", label)
 
         response = await _stream_answer(bound, state["messages"], ctx, streaming)
@@ -212,16 +222,18 @@ def build_graph(
 
         text = _text_of(response)
         if not text or "APPROVED" in text.upper():
-            await ctx.step("critique", "Reviewed the draft — no gaps found")
+            await ctx.step("critique", "Checked the answer — nothing missing")
             return {"critique_done": True}
 
-        await ctx.step("critique", "Found gaps to fix", text)
+        await ctx.step("critique", "Found gaps — going back to research", text)
         return {
             "messages": [
                 HumanMessage(
                     content=(
                         f"Reviewer feedback on your draft:\n{text}\n\n"
-                        "Revise your answer accordingly. Reply with the corrected answer only."
+                        "Revise your answer accordingly. If closing a gap needs facts you "
+                        "have not read yet, search again before you answer — do not fill it "
+                        "in from memory. Otherwise reply with the corrected answer only."
                     ),
                     additional_kwargs=INTERNAL,
                 )
@@ -242,12 +254,15 @@ def build_graph(
         last = state["messages"][-1]
         if getattr(last, "tool_calls", None):
             return "tools" if call_count["n"] < MAX_MODEL_CALLS else END
-        # Reserve a call for the revision the critique may ask for.
+        # Reserve calls for the revision the critique may ask for. Three, not
+        # one: a revision that has to research the gap spends one call on the
+        # tool request and another on the answer that follows it. Critiquing
+        # without room to act on the result just burns a call.
         if (
             state.get("used_tools")
             and not state.get("critique_done")
             and _text_of(last)
-            and call_count["n"] < MAX_MODEL_CALLS - 1
+            and call_count["n"] < MAX_MODEL_CALLS - 3
         ):
             return "critique"
         return END

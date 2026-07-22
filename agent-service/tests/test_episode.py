@@ -290,7 +290,9 @@ async def test_search_falls_back_to_rest_when_mcp_fails(recorded, fake_rest_sear
 
     assert fake_rest_search == ["solid state batteries"]
     read_step = next(e for e in events if e.get("kind") == "read")
-    assert "via REST" in read_step["label"]
+    # Transport belongs in the detail line, never in the label a reader sees.
+    assert "via REST" in read_step["detail"]
+    assert "REST" not in read_step["label"]
     assert next(e for e in events if e["t"] == "message")["text"] == "Here is what I found."
 
 
@@ -321,7 +323,8 @@ async def test_search_uses_mcp_when_available(recorded, fake_rest_search, monkey
 
     assert fake_rest_search == []  # REST was never touched
     read_step = next(e for e in events if e.get("kind") == "read")
-    assert "via MCP" in read_step["label"]
+    assert "via MCP" in read_step["detail"]
+    assert "MCP" not in read_step["label"], "protocol jargon must not reach the label"
 
 
 async def test_critique_sends_the_draft_back_for_one_revision(
@@ -345,13 +348,88 @@ async def test_critique_sends_the_draft_back_for_one_revision(
     assert next(e for e in events if e["t"] == "message")["text"] == "Revised answer, claim removed."
 
     labels = [e["label"] for e in events if e.get("kind") in {"critique", "thinking"}]
-    assert "Found gaps to fix" in labels
-    assert "Revising after review" in labels
+    assert "Found gaps — going back to research" in labels
+    assert "Addressing the review" in labels
 
     # plan + tool call + draft + critique + revision. The second critique is
     # never reached, so exactly one reflection pass happened.
     assert len(recorded["usage"]) == 5
     assert recorded["messages"][0]["content"] == "Revised answer, claim removed."
+
+
+async def test_revision_searches_again_to_close_a_factual_gap(
+    recorded, fake_rest_search, monkeypatch
+):
+    """A review that finds a *research* gap must send the agent back to the tools.
+
+    The revision used to be told to reply with the corrected answer only, which
+    invited the model to write the missing facts from memory — the reflection
+    pass causing the kind of unsupported claim it exists to catch.
+    """
+    script = [
+        plan_reply("1. Look up the causes"),
+        AIMessage(
+            content="",
+            tool_calls=[{"name": "web_search", "args": {"query": "wildfire causes"}, "id": "c1"}],
+            usage_metadata=usage(),
+        ),
+        AIMessage(content="Draft: the causes are drought and wind.", usage_metadata=usage()),
+        critique_reply("- Nothing here cites prevention measures. You never searched for them."),
+        # The revision researches the gap instead of inventing an answer.
+        AIMessage(
+            content="",
+            tool_calls=[
+                {"name": "web_search", "args": {"query": "wildfire prevention"}, "id": "c2"}
+            ],
+            usage_metadata=usage(),
+        ),
+        AIMessage(content="Revised: causes, plus prevention [2].", usage_metadata=usage()),
+        critique_reply("APPROVED"),  # must never be consumed — one pass only
+    ]
+    events, _ = await run_with(script, monkeypatch)
+
+    assert next(e for e in events if e["t"] == "message")["text"] == (
+        "Revised: causes, plus prevention [2]."
+    )
+    # The second search really ran, rather than the gap being written from memory.
+    assert fake_rest_search == ["wildfire causes", "wildfire prevention"]
+
+    # plan + search + draft + critique + revision tool call + answer.
+    assert len(recorded["usage"]) == 6
+
+    # Researching during the revision must not buy a second reflection pass.
+    assert len([e for e in events if e.get("kind") == "critique"]) == 1
+
+
+async def test_critique_is_skipped_when_a_revision_could_not_act_on_it(
+    recorded, fake_rest_search, monkeypatch
+):
+    """Near the ceiling, don't buy a review there is no budget left to answer.
+
+    Now that a revision may need to search, acting on one costs two calls rather
+    than one. A turn that has already spent its budget researching would critique,
+    fail to finish the revision, and fall back to the draft anyway — paying for a
+    reflection pass the user never sees. Better to skip it and answer.
+    """
+    script = [plan_reply("1. Search a lot")]
+    script += [
+        AIMessage(
+            content="",
+            tool_calls=[{"name": "web_search", "args": {"query": f"q{i}"}, "id": f"c{i}"}],
+            usage_metadata=usage(),
+        )
+        for i in range(8)
+    ]
+    script.append(AIMessage(content="Draft answer.", usage_metadata=usage()))
+    # Present but unreachable: the budget gate must stop before consuming these.
+    script.append(critique_reply("- Missing prevention."))
+
+    events, _ = await run_with(script, monkeypatch)
+
+    assert next(e for e in events if e["t"] == "message")["text"] == "Draft answer."
+    assert not [e for e in events if e.get("kind") == "critique"]
+    # plan + 8 searches + draft, and nothing spent on a review that cannot land.
+    assert len(recorded["usage"]) == 10
 
 
 async def test_report_cites_only_pages_that_were_read(recorded, fake_rest_search, monkeypatch):

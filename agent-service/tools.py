@@ -183,7 +183,15 @@ def build_search_tool(ctx: RunContext, mcp_tool: Any | None) -> StructuredTool:
             text = _format_results(answer, results, query, ctx)
             count = len(results)
 
-        await ctx.step("read", f"Read {count} source{'' if count == 1 else 's'} via {transport}", query)
+        # The label is for whoever asked the question, so it says what happened
+        # in plain words. Which transport served the results is a detail only a
+        # reviewer cares about, so it rides in the greyed-out detail line rather
+        # than putting "MCP" in front of someone who has no reason to know it.
+        await ctx.step(
+            "read",
+            f"Read {count} web page{'' if count == 1 else 's'}",
+            f"{query} · via {transport}",
+        )
         return text
 
     async def with_step(query: str, depth: str = "advanced") -> str:
@@ -220,7 +228,7 @@ def build_report_tool(ctx: RunContext, upload: Callable[..., str], save: Callabl
     from pdf import render_report
 
     async def run(title: str, markdown: str) -> str:
-        await ctx.step("pdf", "Writing PDF report", title)
+        await ctx.step("pdf", "Writing the PDF report", title)
         # Built from the registry rather than from the model's recollection, so
         # the list can only contain pages that were genuinely fetched.
         sources = ctx.sources_markdown()
